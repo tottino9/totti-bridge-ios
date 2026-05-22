@@ -43,6 +43,7 @@ final class LyricsRuntimeStore: ObservableObject {
 
     private let defaults: UserDefaults
     private let spotifyClient: SpotifyClient
+    private let bleTransport: LyricsBleCentralTransport
     private var cancellables = Set<AnyCancellable>()
     private var playbackSource: PlaybackSource = .manual
     private var playbackBaseMs: Int64 = 0
@@ -52,11 +53,15 @@ final class LyricsRuntimeStore: ObservableObject {
     private var lastSpotifyPollAt: Date = .distantPast
     private var spotifyPollInFlight = false
     private var lookupGeneration = 0
+    private var lastSentBluetoothSnapshot: LyricsSnapshot?
+    private var lastSentBluetoothSync: LyricsPlaybackSync?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let spotifyClient = SpotifyClient(defaults: defaults)
+        let bleTransport = LyricsBleCentralTransport()
         self.spotifyClient = spotifyClient
+        self.bleTransport = bleTransport
         self.spotifyClientId = spotifyClient.clientId
         self.spotifyAuthStatus = spotifyClient.status
         self.musixmatchEmail = defaults.string(forKey: Keys.musixmatchEmail) ?? ""
@@ -66,6 +71,16 @@ final class LyricsRuntimeStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 self?.spotifyAuthStatus = status
+            }
+            .store(in: &cancellables)
+
+        bleTransport.onMessage = { [weak self] message in
+            self?.handleGlassesMessage(message)
+        }
+        bleTransport.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                self?.deviceStatus = status
             }
             .store(in: &cancellables)
     }
@@ -209,6 +224,7 @@ final class LyricsRuntimeStore: ObservableObject {
         playbackStartedAt = Date()
         snapshot = snapshot.copy(sessionState: .playing, capturedAtEpochMs: nowEpochMs(), clearError: true)
         statusLabel = "Playing local sync preview."
+        sendBluetoothSyncIfNeeded(force: true)
     }
 
     func pause() {
@@ -217,6 +233,7 @@ final class LyricsRuntimeStore: ObservableObject {
         playbackStartedAt = nil
         snapshot = snapshot.copy(sessionState: hasLyrics ? .ready : .idle, capturedAtEpochMs: nowEpochMs())
         statusLabel = hasLyrics ? "Paused." : "Enter a track or connect Spotify."
+        sendBluetoothSyncIfNeeded(force: true)
     }
 
     func restart() {
@@ -315,6 +332,7 @@ final class LyricsRuntimeStore: ObservableObject {
             plainLyrics: "",
             clearError: true
         )
+        sendBluetoothSnapshot()
 
         let composite = CompositeLyricsProvider(providers: [
             MusixmatchLyricsProvider(credentials: musixmatchCredentials),
@@ -348,6 +366,7 @@ final class LyricsRuntimeStore: ObservableObject {
         )
         isLookingUp = false
         statusLabel = result.result.synced ? "Synced lyrics ready." : "Track resolved without timed lyrics."
+        sendBluetoothSnapshot()
         if let media {
             applyMediaProgress(media)
         }
@@ -394,6 +413,67 @@ final class LyricsRuntimeStore: ObservableObject {
             capturedAtEpochMs: nowEpochMs(),
             currentLineIndex: currentLineIndex
         )
+        sendBluetoothSyncIfNeeded()
+    }
+
+    private func handleGlassesMessage(_ message: GlassesToPhoneMessage) {
+        switch message {
+        case .hello(let hello):
+            guard hello.protocolVersion == TransportConstants.protocolVersion else {
+                bleTransport.send(.error("Update the phone and glasses apps to the same Lyrics protocol."))
+                return
+            }
+            bleTransport.send(
+                .helloAck(
+                    ProtocolHelloAck(
+                        protocolVersion: TransportConstants.protocolVersion,
+                        appVersion: "0.1.0",
+                        capabilities: ["status", "lyrics_snapshot", "lyrics_sync", "toggle_playback", "ble_gatt"]
+                    )
+                )
+            )
+            sendBluetoothStatus()
+            sendBluetoothSnapshot(force: true)
+
+        case .requestSnapshot:
+            sendBluetoothSnapshot(force: true)
+
+        case .requestStatus:
+            sendBluetoothStatus()
+
+        case .togglePlayback:
+            togglePlayback()
+        }
+    }
+
+    private func sendBluetoothStatus() {
+        bleTransport.send(.status(deviceStatus))
+    }
+
+    private func sendBluetoothSnapshot(force: Bool = false) {
+        let comparable = snapshot.bluetoothSnapshotComparable
+        guard force || comparable != lastSentBluetoothSnapshot else { return }
+        lastSentBluetoothSnapshot = comparable
+        lastSentBluetoothSync = snapshot.bluetoothSync
+        bleTransport.send(.lyrics(.snapshot(snapshot)))
+    }
+
+    private func sendBluetoothSyncIfNeeded(force: Bool = false) {
+        let sync = snapshot.bluetoothSync
+        guard force || shouldSendBluetoothSync(sync) else { return }
+        lastSentBluetoothSync = sync
+        bleTransport.send(.lyrics(.sync(sync)))
+    }
+
+    private func shouldSendBluetoothSync(_ sync: LyricsPlaybackSync) -> Bool {
+        guard let previous = lastSentBluetoothSync else { return true }
+        if sync.sessionState != previous.sessionState { return true }
+        if sync.currentLineIndex != previous.currentLineIndex { return true }
+        if sync.sessionState != .playing { return false }
+        let elapsedAtSourceMs = sync.capturedAtEpochMs - previous.capturedAtEpochMs
+        if elapsedAtSourceMs <= 0 { return true }
+        let progressDeltaMs = sync.progressMs - previous.progressMs
+        return abs(progressDeltaMs - elapsedAtSourceMs) >= 1_500
     }
 
     private func displayLine(at index: Int, role: LyricDisplayLine.Role) -> LyricDisplayLine {
@@ -403,6 +483,21 @@ final class LyricsRuntimeStore: ObservableObject {
 
     private func nowEpochMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+}
+
+private extension LyricsSnapshot {
+    var bluetoothSnapshotComparable: LyricsSnapshot {
+        copy(progressMs: 0, capturedAtEpochMs: 0, currentLineIndex: -1)
+    }
+
+    var bluetoothSync: LyricsPlaybackSync {
+        LyricsPlaybackSync(
+            sessionState: sessionState,
+            progressMs: progressMs,
+            capturedAtEpochMs: capturedAtEpochMs,
+            currentLineIndex: currentLineIndex
+        )
     }
 }
 

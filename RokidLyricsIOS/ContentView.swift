@@ -279,6 +279,11 @@ struct ContentView: View {
                 .font(.system(size: 11, weight: .regular, design: .monospaced))
                 .foregroundStyle(Color.phosphorTextGhost)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text(store.deviceStatus.statusLabel)
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.phosphorTextGhost)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
         .surface()

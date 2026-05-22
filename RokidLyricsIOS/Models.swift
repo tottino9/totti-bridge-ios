@@ -67,6 +67,9 @@ struct ProtocolHelloAck: Codable, Equatable {
 enum TransportConstants {
     static let bluetoothServiceName = "RokidLyricsBT"
     static let sppUUID = "f77d5d54-cfee-4d8c-b0d0-02cf6f5478aa"
+    static let bleServiceUUID = "0f2d83d0-7f55-43a5-9f12-593fb4b70a01"
+    static let bleRXCharacteristicUUID = "0f2d83d1-7f55-43a5-9f12-593fb4b70a01"
+    static let bleTXCharacteristicUUID = "0f2d83d2-7f55-43a5-9f12-593fb4b70a01"
     static let protocolVersion = 2
 }
 
