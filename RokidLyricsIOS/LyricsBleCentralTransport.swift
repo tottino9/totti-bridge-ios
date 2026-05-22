@@ -1,6 +1,7 @@
 import Combine
 import CoreBluetooth
 import Foundation
+import OSLog
 
 @MainActor
 final class LyricsBleCentralTransport: NSObject, ObservableObject {
@@ -20,11 +21,15 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     private var writeInFlight = false
     private var nextMessageId = UInt32.random(in: 1..<UInt32.max)
     private var repairTimer: Timer?
+    private var linkStartedAt: Date?
+    private var resolvingGatt = false
     private let reassembler = BleWireFramer.Reassembler()
+    private let logger = Logger(subsystem: "app.nectarine4657.lime425", category: "BLE")
 
     private let serviceUUID = CBUUID(string: TransportConstants.bleServiceUUID)
     private let rxUUID = CBUUID(string: TransportConstants.bleRXCharacteristicUUID)
     private let txUUID = CBUUID(string: TransportConstants.bleTXCharacteristicUUID)
+    private let handshakeTimeout: TimeInterval = 8
 
     override init() {
         super.init()
@@ -68,9 +73,8 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         if let peripheral, peripheral.state == .connecting || peripheral.state == .connected {
             return
         }
-        if attachConnectedPeripheralIfAvailable() {
-            return
-        }
+        cancelStaleConnectedPeripherals()
+        logger.info("Scanning for Rokid Lyrics BLE service")
         status = DeviceStatus(connectionState: .connecting, statusLabel: "Scanning for Rokid Lyrics BLE glasses.")
         centralManager?.scanForPeripherals(
             withServices: [serviceUUID],
@@ -90,19 +94,36 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     private func repairConnectionIfNeeded() {
         guard centralManager?.state == .poweredOn else { return }
         if let peripheral, peripheral.state == .connected {
+            if status.connectionState != .connected,
+               let linkStartedAt,
+               Date().timeIntervalSince(linkStartedAt) > handshakeTimeout {
+                logger.warning("BLE handshake timed out; forcing a fresh scan")
+                centralManager?.cancelPeripheralConnection(peripheral)
+                markDisconnected("BLE handshake timed out. Scanning again.")
+                return
+            }
             peripheral.delegate = self
             if rxCharacteristic == nil || txCharacteristic == nil {
-                status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE connected. Refreshing Lyrics service.")
-                if let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
-                    peripheral.discoverCharacteristics([rxUUID, txUUID], for: service)
-                } else {
-                    peripheral.discoverServices([serviceUUID])
+                if !resolvingGatt {
+                    resolvingGatt = true
+                    status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE connected. Refreshing Lyrics service.")
+                    if let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
+                        logger.info("Refreshing BLE characteristics")
+                        peripheral.discoverCharacteristics([rxUUID, txUUID], for: service)
+                    } else {
+                        logger.info("Refreshing BLE services")
+                        peripheral.discoverServices([serviceUUID])
+                    }
                 }
                 return
             }
             if let txCharacteristic, !txCharacteristic.isNotifying {
-                status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE connected. Resubscribing to Lyrics notifications.")
-                peripheral.setNotifyValue(true, for: txCharacteristic)
+                if !resolvingGatt {
+                    resolvingGatt = true
+                    status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE connected. Resubscribing to Lyrics notifications.")
+                    logger.info("Requesting BLE notification resubscribe")
+                    peripheral.setNotifyValue(true, for: txCharacteristic)
+                }
                 return
             }
             pumpWriteQueue()
@@ -111,15 +132,14 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         startScanning()
     }
 
-    private func attachConnectedPeripheralIfAvailable() -> Bool {
-        guard let centralManager else { return false }
-        if let peripheral, peripheral.state == .connecting || peripheral.state == .connected {
-            return true
-        }
+    private func cancelStaleConnectedPeripherals() {
+        guard let centralManager else { return }
         let connected = centralManager.retrieveConnectedPeripherals(withServices: [serviceUUID])
-        guard let existing = connected.first else { return false }
-        attach(existing, label: "Found already-connected Rokid Lyrics BLE. Refreshing.")
-        return true
+        for existing in connected where existing.identifier != peripheral?.identifier {
+            logger.info("Cancelling stale connected BLE peripheral before scan")
+            existing.delegate = nil
+            centralManager.cancelPeripheralConnection(existing)
+        }
     }
 
     private func attach(_ peripheral: CBPeripheral, label: String) {
@@ -130,7 +150,12 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         }
         self.peripheral = peripheral
         peripheral.delegate = self
+        linkStartedAt = Date()
+        resolvingGatt = false
+        rxCharacteristic = nil
+        txCharacteristic = nil
         status = DeviceStatus(connectionState: .connecting, statusLabel: label)
+        logger.info("Attaching BLE peripheral \(peripheral.identifier.uuidString, privacy: .public), state=\(peripheral.state.rawValue)")
         centralManager?.stopScan()
         if peripheral.state == .connected {
             peripheral.discoverServices([serviceUUID])
@@ -172,6 +197,8 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         outgoingFrames.removeAll()
         writeInFlight = false
         nextMessageId = UInt32.random(in: 1..<UInt32.max)
+        linkStartedAt = nil
+        resolvingGatt = false
         reassembler.clear()
         peripheral = nil
         startScanning()
@@ -202,8 +229,13 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
     ) {
         Task { @MainActor in
             if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
-               let restored = peripherals.first {
-                attach(restored, label: "Restored Rokid Lyrics BLE connection.")
+               !peripherals.isEmpty {
+                logger.info("Dropping restored BLE peripherals and starting a fresh scan")
+                for restored in peripherals {
+                    restored.delegate = nil
+                    central.cancelPeripheralConnection(restored)
+                }
+                markDisconnected("Restored BLE state. Scanning again.")
             }
         }
     }
@@ -232,7 +264,10 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
             }
             self.peripheral = peripheral
             peripheral.delegate = self
+            linkStartedAt = Date()
+            resolvingGatt = true
             status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE connected. Discovering Lyrics service.")
+            logger.info("BLE didConnect; discovering service")
             peripheral.discoverServices([serviceUUID])
         }
     }
@@ -255,6 +290,7 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
     ) {
         Task { @MainActor in
             guard isCurrent(peripheral) else { return }
+            logger.info("BLE didDisconnect: \(error?.localizedDescription ?? "no error", privacy: .public)")
             markDisconnected(error?.localizedDescription ?? "BLE disconnected. Scanning again.")
         }
     }
@@ -265,14 +301,17 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         Task { @MainActor in
             guard isCurrent(peripheral) else { return }
             if let error {
+                resolvingGatt = false
                 markDisconnected(error.localizedDescription)
                 return
             }
             let service = peripheral.services?.first { $0.uuid == serviceUUID }
             guard let service else {
+                resolvingGatt = false
                 markDisconnected("Rokid Lyrics BLE service missing.")
                 return
             }
+            logger.info("BLE service discovered; discovering characteristics")
             peripheral.discoverCharacteristics([rxUUID, txUUID], for: service)
         }
     }
@@ -285,15 +324,19 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         Task { @MainActor in
             guard isCurrent(peripheral) else { return }
             if let error {
+                resolvingGatt = false
                 markDisconnected(error.localizedDescription)
                 return
             }
             rxCharacteristic = service.characteristics?.first { $0.uuid == rxUUID }
             txCharacteristic = service.characteristics?.first { $0.uuid == txUUID }
             guard let txCharacteristic, rxCharacteristic != nil else {
+                resolvingGatt = false
+                logger.error("BLE characteristics missing after discovery")
                 markDisconnected("Rokid Lyrics BLE characteristics missing.")
                 return
             }
+            logger.info("BLE characteristics discovered; enabling notifications")
             peripheral.setNotifyValue(true, for: txCharacteristic)
             status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE ready. Waiting for Lyrics handshake.")
         }
@@ -307,14 +350,19 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         Task { @MainActor in
             guard isCurrent(peripheral) else { return }
             if let error {
+                resolvingGatt = false
+                logger.error("BLE notification subscription failed: \(error.localizedDescription, privacy: .public)")
                 markDisconnected(error.localizedDescription)
                 return
             }
+            resolvingGatt = false
             if characteristic.uuid == txUUID, characteristic.isNotifying {
                 outgoingFrames.removeAll()
                 writeInFlight = false
                 nextMessageId = UInt32.random(in: 1..<UInt32.max)
+                linkStartedAt = nil
                 reassembler.clear()
+                logger.info("BLE notifications enabled")
                 status = DeviceStatus(connectionState: .connected, statusLabel: "BLE subscribed to Rokid Lyrics glasses.", bluetoothClientCount: 1)
                 onSubscribed?()
                 pumpWriteQueue()
