@@ -290,7 +290,11 @@ final class LyricsRuntimeStore: ObservableObject {
         lastSpotifyPollAt = Date()
 
         do {
-            let playback = try await spotifyClient.fetchCurrentlyPlaying()
+            guard let playback = try await spotifyClient.fetchCurrentlyPlaying() else {
+                spotifyPollInFlight = false
+                handleSpotifyIdle()
+                return
+            }
             spotifyPollInFlight = false
             handleSpotifyPlayback(playback)
         } catch {

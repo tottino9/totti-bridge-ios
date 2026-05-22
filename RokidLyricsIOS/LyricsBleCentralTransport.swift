@@ -327,8 +327,8 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         didUpdateValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        guard error == nil, characteristic.uuid == txUUID, let data = characteristic.value else { return }
         Task { @MainActor in
+            guard error == nil, characteristic.uuid == txUUID, let data = characteristic.value else { return }
             guard isCurrent(peripheral) else { return }
             handleIncoming(data)
         }
