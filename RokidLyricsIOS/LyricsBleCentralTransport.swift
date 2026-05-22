@@ -10,6 +10,7 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     )
 
     var onMessage: ((GlassesToPhoneMessage) -> Void)?
+    var onSubscribed: (() -> Void)?
 
     private var centralManager: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -17,7 +18,7 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     private var txCharacteristic: CBCharacteristic?
     private var outgoingFrames: [Data] = []
     private var writeInFlight = false
-    private var nextMessageId: UInt32 = 1
+    private var nextMessageId = UInt32.random(in: 1..<UInt32.max)
     private var repairTimer: Timer?
     private let reassembler = BleWireFramer.Reassembler()
 
@@ -43,18 +44,30 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         status.connectionState == .connected
     }
 
-    func send(_ message: PhoneToGlassesMessage) {
+    func send(_ message: PhoneToGlassesMessage, priority: Bool = false) {
         guard let json = try? WireProtocol.encodePhoneMessage(message) else { return }
         let packetSize = maxPacketSize()
         let frames = BleWireFramer.encode(message: json, messageId: nextMessageId, maxPacketSize: packetSize)
         nextMessageId &+= 1
         guard !frames.isEmpty else { return }
-        outgoingFrames.append(contentsOf: frames)
+        if priority {
+            outgoingFrames.removeAll()
+            outgoingFrames.append(contentsOf: frames)
+        } else {
+            outgoingFrames.append(contentsOf: frames)
+        }
         pumpWriteQueue()
+    }
+
+    func dropQueuedWrites() {
+        outgoingFrames.removeAll()
     }
 
     private func startScanning() {
         guard centralManager?.state == .poweredOn else { return }
+        if let peripheral, peripheral.state == .connecting || peripheral.state == .connected {
+            return
+        }
         if attachConnectedPeripheralIfAvailable() {
             return
         }
@@ -100,6 +113,9 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
 
     private func attachConnectedPeripheralIfAvailable() -> Bool {
         guard let centralManager else { return false }
+        if let peripheral, peripheral.state == .connecting || peripheral.state == .connected {
+            return true
+        }
         let connected = centralManager.retrieveConnectedPeripherals(withServices: [serviceUUID])
         guard let existing = connected.first else { return false }
         attach(existing, label: "Found already-connected Rokid Lyrics BLE. Refreshing.")
@@ -107,6 +123,11 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     }
 
     private func attach(_ peripheral: CBPeripheral, label: String) {
+        if let current = self.peripheral,
+           current.identifier != peripheral.identifier,
+           current.state == .connecting || current.state == .connected {
+            return
+        }
         self.peripheral = peripheral
         peripheral.delegate = self
         status = DeviceStatus(connectionState: .connecting, statusLabel: label)
@@ -119,9 +140,7 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     }
 
     private func maxPacketSize() -> Int {
-        guard let peripheral else { return 20 }
-        let maxWrite = peripheral.maximumWriteValueLength(for: .withResponse)
-        return min(max(maxWrite, 20), 180)
+        20
     }
 
     private func pumpWriteQueue() {
@@ -142,13 +161,19 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         onMessage?(message)
     }
 
+    private func isCurrent(_ candidate: CBPeripheral) -> Bool {
+        peripheral?.identifier == candidate.identifier
+    }
+
     private func markDisconnected(_ label: String) {
         status = DeviceStatus(connectionState: .connecting, statusLabel: label)
         rxCharacteristic = nil
         txCharacteristic = nil
         outgoingFrames.removeAll()
         writeInFlight = false
+        nextMessageId = UInt32.random(in: 1..<UInt32.max)
         reassembler.clear()
+        peripheral = nil
         startScanning()
     }
 }
@@ -190,12 +215,21 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
         rssi RSSI: NSNumber
     ) {
         Task { @MainActor in
+            if let current = self.peripheral,
+               current.identifier != peripheral.identifier,
+               current.state == .connecting || current.state == .connected {
+                return
+            }
             attach(peripheral, label: "Found Rokid Lyrics BLE. Connecting.")
         }
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else {
+                central.cancelPeripheralConnection(peripheral)
+                return
+            }
             self.peripheral = peripheral
             peripheral.delegate = self
             status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE connected. Discovering Lyrics service.")
@@ -209,6 +243,7 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             markDisconnected(error?.localizedDescription ?? "BLE connect failed. Scanning again.")
         }
     }
@@ -219,6 +254,7 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             markDisconnected(error?.localizedDescription ?? "BLE disconnected. Scanning again.")
         }
     }
@@ -227,6 +263,7 @@ extension LyricsBleCentralTransport: CBCentralManagerDelegate {
 extension LyricsBleCentralTransport: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             if let error {
                 markDisconnected(error.localizedDescription)
                 return
@@ -246,6 +283,7 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             if let error {
                 markDisconnected(error.localizedDescription)
                 return
@@ -267,12 +305,18 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             if let error {
                 markDisconnected(error.localizedDescription)
                 return
             }
             if characteristic.uuid == txUUID, characteristic.isNotifying {
+                outgoingFrames.removeAll()
+                writeInFlight = false
+                nextMessageId = UInt32.random(in: 1..<UInt32.max)
+                reassembler.clear()
                 status = DeviceStatus(connectionState: .connected, statusLabel: "BLE subscribed to Rokid Lyrics glasses.", bluetoothClientCount: 1)
+                onSubscribed?()
                 pumpWriteQueue()
             }
         }
@@ -285,6 +329,7 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
     ) {
         guard error == nil, characteristic.uuid == txUUID, let data = characteristic.value else { return }
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             handleIncoming(data)
         }
     }
@@ -295,6 +340,7 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            guard isCurrent(peripheral) else { return }
             writeInFlight = false
             if let error {
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE write failed: \(error.localizedDescription)")

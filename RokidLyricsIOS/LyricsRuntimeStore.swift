@@ -52,9 +52,11 @@ final class LyricsRuntimeStore: ObservableObject {
     private var activeMediaKey: String?
     private var lastSpotifyPollAt: Date = .distantPast
     private var spotifyPollInFlight = false
+    private var lookupTask: Task<Void, Never>?
     private var lookupGeneration = 0
     private var lastSentBluetoothSnapshot: LyricsSnapshot?
     private var lastSentBluetoothSync: LyricsPlaybackSync?
+    private var bleProtocolReady = false
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -77,10 +79,17 @@ final class LyricsRuntimeStore: ObservableObject {
         bleTransport.onMessage = { [weak self] message in
             self?.handleGlassesMessage(message)
         }
+        bleTransport.onSubscribed = { [weak self] in
+            self?.completeBleHandshake()
+        }
         bleTransport.$status
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
-                self?.deviceStatus = status
+                guard let self else { return }
+                self.deviceStatus = status
+                if status.connectionState != .connected {
+                    self.markBleProtocolNotReady()
+                }
             }
             .store(in: &cancellables)
     }
@@ -166,6 +175,8 @@ final class LyricsRuntimeStore: ObservableObject {
             spotifyClient.disconnect()
             activeSpotifyPlayback = nil
             activeMediaKey = nil
+            lookupTask?.cancel()
+            isLookingUp = false
             spotifyNowPlayingLabel = "Spotify disconnected."
             if playbackSource == .spotify {
                 playbackSource = .manual
@@ -195,6 +206,7 @@ final class LyricsRuntimeStore: ObservableObject {
         playbackSource = .manual
         activeMediaKey = nil
         activeSpotifyPlayback = nil
+        lookupTask?.cancel()
         isPlaying = false
         playbackBaseMs = 0
         playbackStartedAt = nil
@@ -206,7 +218,7 @@ final class LyricsRuntimeStore: ObservableObject {
             durationSeconds: Int(durationSecondsText.trimmingCharacters(in: .whitespacesAndNewlines)),
             isrc: nil
         )
-        await performLookup(request: request, media: nil)
+        await performLookup(request: request, media: nil, expectedMediaKey: nil)
     }
 
     func togglePlayback() {
@@ -276,12 +288,18 @@ final class LyricsRuntimeStore: ObservableObject {
 
         spotifyPollInFlight = true
         lastSpotifyPollAt = Date()
-        defer { spotifyPollInFlight = false }
 
         do {
-            guard let playback = try await spotifyClient.fetchCurrentlyPlaying() else { return }
-            await handleSpotifyPlayback(playback)
+            let playback = try await spotifyClient.fetchCurrentlyPlaying()
+            spotifyPollInFlight = false
+            handleSpotifyPlayback(playback)
         } catch {
+            spotifyPollInFlight = false
+            if let spotifyError = error as? SpotifyClientError,
+               case .noActivePlayback = spotifyError {
+                handleSpotifyIdle()
+                return
+            }
             spotifyNowPlayingLabel = error.localizedDescription
             if playbackSource != .spotify {
                 statusLabel = error.localizedDescription
@@ -289,7 +307,7 @@ final class LyricsRuntimeStore: ObservableObject {
         }
     }
 
-    private func handleSpotifyPlayback(_ playback: SpotifyPlayback) async {
+    private func handleSpotifyPlayback(_ playback: SpotifyPlayback) {
         let media = playback.liveSnapshot
         activeSpotifyPlayback = playback
         playbackSource = .spotify
@@ -302,15 +320,55 @@ final class LyricsRuntimeStore: ObservableObject {
 
         if activeMediaKey != media.lookupKey {
             activeMediaKey = media.lookupKey
-            await performLookup(request: media.lookupRequest, media: media)
+            lookupTask?.cancel()
+            lookupTask = Task { @MainActor in
+                await self.performLookup(
+                    request: media.lookupRequest,
+                    media: media,
+                    expectedMediaKey: media.lookupKey
+                )
+            }
         } else {
             applyMediaProgress(media)
         }
     }
 
-    private func performLookup(request: LyricsLookupRequest, media: MediaPlaybackSnapshot?) async {
+    private func handleSpotifyIdle() {
+        guard playbackSource == .spotify || activeSpotifyPlayback != nil else { return }
+        playbackSource = .manual
+        activeSpotifyPlayback = nil
+        activeMediaKey = nil
+        lookupTask?.cancel()
+        isPlaying = false
+        isLookingUp = false
+        playbackStartedAt = nil
+        playbackBaseMs = 0
+        spotifyNowPlayingLabel = "Spotify idle."
+        title = ""
+        artist = ""
+        album = ""
+        durationSecondsText = ""
+        snapshot = LyricsSnapshot(
+            sessionState: .idle,
+            sourceSummary: "Spotify is not playing.",
+            capturedAtEpochMs: nowEpochMs()
+        )
+        statusLabel = "Spotify is not playing."
+        sendBluetoothSnapshot(force: true)
+    }
+
+    private func performLookup(
+        request: LyricsLookupRequest,
+        media: MediaPlaybackSnapshot?,
+        expectedMediaKey: String?
+    ) async {
         lookupGeneration += 1
         let generation = lookupGeneration
+        defer {
+            if generation == lookupGeneration {
+                isLookingUp = false
+            }
+        }
         isLookingUp = true
         let progressMs = media?.positionMs ?? 0
         let source = media?.source ?? "manual"
@@ -340,7 +398,10 @@ final class LyricsRuntimeStore: ObservableObject {
             LrcLibLyricsClient()
         ])
         let result = await composite.fetch(request)
-        guard generation == lookupGeneration else { return }
+        guard !Task.isCancelled, generation == lookupGeneration else { return }
+        if let expectedMediaKey, activeMediaKey != expectedMediaKey {
+            return
+        }
 
         providerStatusLabel = result.attemptSummaries
             .map { "\($0.provider): \($0.outcome.rawValue)" }
@@ -364,7 +425,6 @@ final class LyricsRuntimeStore: ObservableObject {
             plainLyrics: result.result.plainLyrics,
             errorMessage: nil
         )
-        isLookingUp = false
         statusLabel = result.result.synced ? "Synced lyrics ready." : "Track resolved without timed lyrics."
         sendBluetoothSnapshot()
         if let media {
@@ -420,20 +480,10 @@ final class LyricsRuntimeStore: ObservableObject {
         switch message {
         case .hello(let hello):
             guard hello.protocolVersion == TransportConstants.protocolVersion else {
-                bleTransport.send(.error("Update the phone and glasses apps to the same Lyrics protocol."))
+                bleTransport.send(.error("Update the phone and glasses apps to the same Lyrics protocol."), priority: true)
                 return
             }
-            bleTransport.send(
-                .helloAck(
-                    ProtocolHelloAck(
-                        protocolVersion: TransportConstants.protocolVersion,
-                        appVersion: "0.1.0",
-                        capabilities: ["status", "lyrics_snapshot", "lyrics_sync", "toggle_playback", "ble_gatt"]
-                    )
-                )
-            )
-            sendBluetoothStatus()
-            sendBluetoothSnapshot(force: true)
+            completeBleHandshake()
 
         case .requestSnapshot:
             sendBluetoothSnapshot(force: true)
@@ -447,10 +497,12 @@ final class LyricsRuntimeStore: ObservableObject {
     }
 
     private func sendBluetoothStatus() {
+        guard bleProtocolReady else { return }
         bleTransport.send(.status(deviceStatus))
     }
 
     private func sendBluetoothSnapshot(force: Bool = false) {
+        guard bleProtocolReady else { return }
         let comparable = snapshot.bluetoothSnapshotComparable
         guard force || comparable != lastSentBluetoothSnapshot else { return }
         lastSentBluetoothSnapshot = comparable
@@ -459,10 +511,38 @@ final class LyricsRuntimeStore: ObservableObject {
     }
 
     private func sendBluetoothSyncIfNeeded(force: Bool = false) {
+        guard bleProtocolReady else { return }
         let sync = snapshot.bluetoothSync
         guard force || shouldSendBluetoothSync(sync) else { return }
         lastSentBluetoothSync = sync
         bleTransport.send(.lyrics(.sync(sync)))
+    }
+
+    private func markBleProtocolNotReady() {
+        bleProtocolReady = false
+        lastSentBluetoothSnapshot = nil
+        lastSentBluetoothSync = nil
+        bleTransport.dropQueuedWrites()
+    }
+
+    private func completeBleHandshake() {
+        bleProtocolReady = true
+        lastSentBluetoothSnapshot = nil
+        lastSentBluetoothSync = nil
+        bleTransport.dropQueuedWrites()
+        bleTransport.send(
+            .helloAck(
+                ProtocolHelloAck(
+                    protocolVersion: TransportConstants.protocolVersion,
+                    appVersion: "0.1.0",
+                    capabilities: ["status", "lyrics_snapshot", "lyrics_sync", "toggle_playback", "ble_gatt"]
+                )
+            ),
+            priority: true
+        )
+        sendBluetoothStatus()
+        sendBluetoothSnapshot(force: true)
+        sendBluetoothSyncIfNeeded(force: true)
     }
 
     private func shouldSendBluetoothSync(_ sync: LyricsPlaybackSync) -> Bool {
