@@ -418,7 +418,7 @@ private enum Keys {
 
 private extension Int64 {
     func coerceAtLeast(_ minimum: Int64) -> Int64 {
-        max(self, minimum)
+        Swift.max(self, minimum)
     }
 }
 
