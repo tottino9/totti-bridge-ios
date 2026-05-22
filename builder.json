@@ -1,0 +1,18 @@
+{
+  "project": "RokidLyricsIOS",
+  "platform": "ios",
+  "github": {
+    "owner": "Anezium",
+    "repo": "Rokid-Lyrics-iOS"
+  },
+  "ios": {
+    "path": ".",
+    "scheme": "RokidLyricsIOS",
+    "signing": true
+  },
+  "flutter": {
+    "watch": {}
+  },
+  "reactNative": {},
+  "mobai": {}
+}
