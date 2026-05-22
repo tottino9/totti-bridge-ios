@@ -54,6 +54,7 @@ final class LyricsRuntimeStore: ObservableObject {
     private var spotifyPollInFlight = false
     private var lookupTask: Task<Void, Never>?
     private var lookupGeneration = 0
+    private var snapshotRevision: Int64 = 0
     private var lastSentBluetoothSnapshot: LyricsSnapshot?
     private var lastSentBluetoothSync: LyricsPlaybackSync?
     private var bleProtocolReady = false
@@ -354,6 +355,7 @@ final class LyricsRuntimeStore: ObservableObject {
         durationSecondsText = ""
         snapshot = LyricsSnapshot(
             sessionState: .idle,
+            revision: nextSnapshotRevision(),
             sourceSummary: "Spotify is not playing.",
             capturedAtEpochMs: nowEpochMs()
         )
@@ -368,6 +370,8 @@ final class LyricsRuntimeStore: ObservableObject {
     ) async {
         lookupGeneration += 1
         let generation = lookupGeneration
+        let lookupMediaKey = expectedMediaKey ?? mediaKey(for: request, source: media?.source ?? "manual")
+        let lookupRevision = nextSnapshotRevision()
         defer {
             if generation == lookupGeneration {
                 isLookingUp = false
@@ -380,6 +384,8 @@ final class LyricsRuntimeStore: ObservableObject {
 
         snapshot = snapshot.copy(
             sessionState: .loading,
+            mediaKey: lookupMediaKey,
+            revision: lookupRevision,
             trackTitle: request.title,
             artistName: request.artist,
             albumName: request.album,
@@ -415,6 +421,8 @@ final class LyricsRuntimeStore: ObservableObject {
         let lineIndex = LrcParser.index(for: result.result.lines, progressMs: progressMs)
         snapshot = LyricsSnapshot(
             sessionState: media?.isPlaying == true ? .playing : .ready,
+            mediaKey: lookupMediaKey,
+            revision: lookupRevision,
             trackTitle: result.result.trackTitle,
             artistName: result.result.artistName,
             albumName: result.result.albumName,
@@ -568,6 +576,22 @@ final class LyricsRuntimeStore: ObservableObject {
     private func nowEpochMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
     }
+
+    private func nextSnapshotRevision() -> Int64 {
+        snapshotRevision += 1
+        return snapshotRevision
+    }
+
+    private func mediaKey(for request: LyricsLookupRequest, source: String) -> String {
+        [
+            source,
+            request.isrc ?? "",
+            request.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            request.artist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            request.album.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            request.durationSeconds.map(String.init) ?? ""
+        ].joined(separator: "|")
+    }
 }
 
 private extension LyricsSnapshot {
@@ -578,6 +602,8 @@ private extension LyricsSnapshot {
     var bluetoothSync: LyricsPlaybackSync {
         LyricsPlaybackSync(
             sessionState: sessionState,
+            mediaKey: mediaKey,
+            revision: revision,
             progressMs: progressMs,
             capturedAtEpochMs: capturedAtEpochMs,
             currentLineIndex: currentLineIndex
@@ -604,6 +630,8 @@ private extension Int64 {
 private extension LyricsSnapshot {
     func copy(
         sessionState: LyricsSessionState? = nil,
+        mediaKey: String? = nil,
+        revision: Int64? = nil,
         trackTitle: String? = nil,
         artistName: String? = nil,
         albumName: String? = nil,
@@ -622,6 +650,8 @@ private extension LyricsSnapshot {
     ) -> LyricsSnapshot {
         LyricsSnapshot(
             sessionState: sessionState ?? self.sessionState,
+            mediaKey: mediaKey ?? self.mediaKey,
+            revision: revision ?? self.revision,
             trackTitle: trackTitle ?? self.trackTitle,
             artistName: artistName ?? self.artistName,
             albumName: albumName ?? self.albumName,

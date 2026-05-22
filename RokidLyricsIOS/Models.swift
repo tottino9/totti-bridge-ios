@@ -30,6 +30,8 @@ struct LyricsLine: Codable, Equatable, Identifiable {
 
 struct LyricsSnapshot: Codable, Equatable {
     var sessionState: LyricsSessionState = .idle
+    var mediaKey: String = ""
+    var revision: Int64 = 0
     var trackTitle: String = ""
     var artistName: String = ""
     var albumName: String = ""
@@ -47,6 +49,8 @@ struct LyricsSnapshot: Codable, Equatable {
 
 struct LyricsPlaybackSync: Codable, Equatable {
     var sessionState: LyricsSessionState = .idle
+    var mediaKey: String = ""
+    var revision: Int64 = 0
     var progressMs: Int64 = 0
     var capturedAtEpochMs: Int64 = 0
     var currentLineIndex: Int = -1
