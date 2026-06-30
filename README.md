@@ -4,6 +4,14 @@ Native iOS companion for Rokid Lyrics.
 
 This repository is intentionally set up for GitHub Actions IPA builds. The iOS version is a SwiftUI companion with Spotify currently-playing lookup, local synced playback preview, and shared protocol models that mirror the Android `shared-contracts` module.
 
+## Screenshots
+
+Redacted simulator captures. The displayed client ID, track ID, email, and provider credentials are placeholders.
+
+| Runtime | Settings | Providers |
+| --- | --- | --- |
+| <img src="Docs/Images/readme-dashboard.png" alt="Rokid Lyrics runtime dashboard" width="260"> | <img src="Docs/Images/readme-settings-api.png" alt="Rokid Lyrics API settings with redacted values" width="260"> | <img src="Docs/Images/readme-settings-providers.png" alt="Rokid Lyrics provider settings with redacted values" width="260"> |
+
 ## What works now
 
 - Spotify Web API OAuth PKCE login with currently-playing polling.

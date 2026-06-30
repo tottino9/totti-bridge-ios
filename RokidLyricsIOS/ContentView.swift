@@ -10,10 +10,26 @@ private enum LyricsInputField {
     case musixmatchPassword
 }
 
+#if DEBUG
+private enum ReadmeScreenshotScreen: String {
+    case dashboard
+    case settings
+    case providers
+}
+#endif
+
 struct ContentView: View {
     @EnvironmentObject private var store: LyricsRuntimeStore
     @FocusState private var focusedField: LyricsInputField?
-    @State private var showingSettings = false
+    @State private var showingSettings: Bool
+
+    init() {
+        #if DEBUG
+        _showingSettings = State(initialValue: Self.readmeScreenshotScreen != .dashboard)
+        #else
+        _showingSettings = State(initialValue: false)
+        #endif
+    }
 
     var body: some View {
         ScrollView {
@@ -30,6 +46,9 @@ struct ContentView: View {
         .background(Color.phosphorBackground.ignoresSafeArea())
         .foregroundStyle(Color.phosphorTextBright)
         .task {
+            #if DEBUG
+            guard ProcessInfo.processInfo.environment["ROKID_SCREENSHOT_MODE"] != "1" else { return }
+            #endif
             store.autoConnectCxrIfNeeded()
         }
         .sheet(isPresented: $showingSettings) {
@@ -65,6 +84,7 @@ struct ContentView: View {
                 Image(systemName: "gearshape")
             }
             .buttonStyle(IconButtonStyle())
+            .accessibilityIdentifier("settingsButton")
         }
     }
 
@@ -159,14 +179,26 @@ struct ContentView: View {
             .padding(.horizontal, 18)
             .padding(.top, 18)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    spotifySettingsSection
-                    lyricsSettingsSection
-                    providerSettingsSection
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        spotifySettingsSection
+                        lyricsSettingsSection
+                        providerSettingsSection
+                            .id("providerSettings")
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 28)
                 }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 28)
+                .onAppear {
+                    #if DEBUG
+                    if Self.readmeScreenshotScreen == .providers {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            proxy.scrollTo("providerSettings", anchor: .top)
+                        }
+                    }
+                    #endif
+                }
             }
         }
         .background(Color.phosphorBackground.ignoresSafeArea())
@@ -375,6 +407,17 @@ struct ContentView: View {
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", Int(minutes), Int(seconds))
     }
+
+    #if DEBUG
+    private static var readmeScreenshotScreen: ReadmeScreenshotScreen {
+        guard ProcessInfo.processInfo.environment["ROKID_SCREENSHOT_MODE"] == "1",
+              let rawValue = ProcessInfo.processInfo.environment["ROKID_SCREENSHOT_SCREEN"],
+              let screen = ReadmeScreenshotScreen(rawValue: rawValue) else {
+            return .dashboard
+        }
+        return screen
+    }
+    #endif
 }
 
 private struct FieldRow: View {

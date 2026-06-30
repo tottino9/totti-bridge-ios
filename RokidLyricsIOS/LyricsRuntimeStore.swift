@@ -241,9 +241,9 @@ final class LyricsRuntimeStore: ObservableObject {
     private let lyricsResultCacheLimit = 32
     private let backgroundAudio = BackgroundAudioKeepAlive()
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, keychain: KeychainSecretStore = KeychainSecretStore()) {
         self.defaults = defaults
-        self.keychain = KeychainSecretStore()
+        self.keychain = keychain
         let spotifyClient = SpotifyClient(defaults: defaults)
         let glassesTransport = LyricsGlassesTransport()
         self.spotifyClient = spotifyClient
@@ -289,6 +289,84 @@ final class LyricsRuntimeStore: ObservableObject {
             observeApplicationLifecycle()
         }
     }
+
+    #if DEBUG
+    static func screenshotPreviewStore() -> LyricsRuntimeStore {
+        let suiteName = "com.anezium.rokidlyrics.screenshots"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set("pk_client_id_redacted", forKey: "spotify.clientId")
+        defaults.set("spotify:track:track_id_redacted", forKey: Keys.spotifyLyricsInput)
+        defaults.set(SpotifyLyricsSourceMode.backend.rawValue, forKey: Keys.spotifyLyricsMode)
+        defaults.set("http://127.0.0.1:8787/lyrics", forKey: Keys.spotifyLyricsBackendURL)
+        defaults.set("redacted@example.com", forKey: Keys.musixmatchEmail)
+        defaults.set("redacted-password", forKey: Keys.musixmatchPassword)
+
+        let store = LyricsRuntimeStore(
+            defaults: defaults,
+            keychain: KeychainSecretStore(service: "com.anezium.rokidlyrics.screenshots")
+        )
+        store.applyScreenshotFixture()
+        DispatchQueue.main.async {
+            store.applyScreenshotFixture()
+        }
+        return store
+    }
+
+    private func applyScreenshotFixture() {
+        spotifyAuthStatus = .connected
+        spotifyNowPlayingLabel = "Spotify monitor: sample playback"
+        isPlaying = true
+        playbackSource = .spotify
+        activeSpotifyPlayback = SpotifyPlayback(
+            snapshot: MediaPlaybackSnapshot(
+                source: "SPOTIFY",
+                trackId: "track_id_redacted",
+                title: "Sample Track",
+                artist: "Sample Artist",
+                album: "Sample Album",
+                durationSeconds: 192,
+                positionMs: 84_200,
+                isPlaying: true,
+                isrc: "ISRC_REDACTED"
+            ),
+            observedAt: Date()
+        )
+        activeMediaKey = "spotify|track_id_redacted"
+        statusLabel = "Lyrics loaded. HTTP 200 / LINE_SYNCED / 47 lines."
+        providerStatusLabel = "Providers: Spotify -> LRCLIB -> Netease -> Musixmatch."
+        deviceStatus = DeviceStatus(
+            connectionState: .connected,
+            statusLabel: "CXR-L ready. Rokid Lyrics glasses app is running.",
+            bluetoothClientCount: 1,
+            notificationAccessEnabled: false,
+            lastError: nil
+        )
+        snapshot = LyricsSnapshot(
+            sessionState: .playing,
+            mediaKey: "spotify|track_id_redacted",
+            revision: 1,
+            trackTitle: "Sample Track",
+            artistName: "Sample Artist",
+            albumName: "Sample Album",
+            durationSeconds: 192,
+            provider: "SPOTIFY",
+            sourceSummary: "Spotify color-lyrics: status=200 syncType=LINE_SYNCED line_count=47.",
+            synced: true,
+            progressMs: 84_200,
+            capturedAtEpochMs: nowEpochMs(),
+            currentLineIndex: 1,
+            lines: [
+                LyricsLine(startTimeMs: 80_000, text: "Previous synced line"),
+                LyricsLine(startTimeMs: 84_000, text: "Current synced line"),
+                LyricsLine(startTimeMs: 88_000, text: "Next synced line"),
+                LyricsLine(startTimeMs: 92_000, text: "Upcoming synced line"),
+            ],
+            plainLyrics: "",
+            errorMessage: nil
+        )
+    }
+    #endif
 
     var canLookup: Bool {
         !isLookingUp &&

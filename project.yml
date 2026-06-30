@@ -32,6 +32,24 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 32BW73UGAZ
 
+  RokidLyricsIOSScreenshots:
+    type: application
+    platform: iOS
+    sources:
+      - path: RokidLyricsIOS
+    resources:
+      - path: RokidLyricsIOS/Resources
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: "NO"
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_BUNDLE_IDENTIFIER: com.anezium.rokidlyrics.screenshots
+        PRODUCT_NAME: RokidLyricsIOSScreenshots
+        INFOPLIST_FILE: RokidLyricsIOS/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 32BW73UGAZ
+
   RokidLyricsIOSTests:
     type: bundle.unit-test
     platform: iOS
@@ -58,3 +76,10 @@ schemes:
       config: Debug
     archive:
       config: Release
+
+  RokidLyricsIOSScreenshots:
+    build:
+      targets:
+        RokidLyricsIOSScreenshots: all
+    run:
+      config: Debug
