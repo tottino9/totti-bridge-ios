@@ -8,6 +8,7 @@ struct WireEnvelope: Codable, Equatable {
 
 enum GlassesToPhoneMessage: Equatable {
     case hello(ProtocolHello)
+    case mediaHint(MediaPlaybackHint)
     case requestSnapshot
     case requestStatus
     case togglePlayback
@@ -15,6 +16,8 @@ enum GlassesToPhoneMessage: Equatable {
 
 enum LyricsEvent: Equatable {
     case snapshot(LyricsSnapshot)
+    case window(LyricsWindowSnapshot)
+    case script(LyricsScriptSnapshot)
     case sync(LyricsPlaybackSync)
     case error(String)
 }
@@ -57,6 +60,8 @@ enum WireProtocol {
         switch message {
         case .hello(let hello):
             return try WireEnvelope(channel: "runtime", type: "hello", payloadJson: payload(hello))
+        case .mediaHint(let hint):
+            return try WireEnvelope(channel: "runtime", type: "media_hint", payloadJson: payload(hint))
         case .requestSnapshot:
             return WireEnvelope(channel: "runtime", type: "request_snapshot")
         case .requestStatus:
@@ -71,6 +76,8 @@ enum WireProtocol {
         switch envelope.type {
         case "hello":
             return decodePayload(ProtocolHello.self, envelope.payloadJson).map(GlassesToPhoneMessage.hello)
+        case "media_hint":
+            return decodePayload(MediaPlaybackHint.self, envelope.payloadJson).map(GlassesToPhoneMessage.mediaHint)
         case "request_snapshot":
             return .requestSnapshot
         case "request_status":
@@ -92,6 +99,10 @@ enum WireProtocol {
             switch event {
             case .snapshot(let snapshot):
                 return try WireEnvelope(channel: "lyrics", type: "snapshot", payloadJson: payload(snapshot))
+            case .window(let snapshot):
+                return try WireEnvelope(channel: "lyrics", type: "window", payloadJson: payload(snapshot))
+            case .script(let snapshot):
+                return try WireEnvelope(channel: "lyrics", type: "script", payloadJson: payload(snapshot))
             case .sync(let sync):
                 return try WireEnvelope(channel: "lyrics", type: "sync", payloadJson: payload(sync))
             case .error(let message):
@@ -112,6 +123,10 @@ enum WireProtocol {
             return decodePayload(ErrorPayload.self, envelope.payloadJson).map { .error($0.message) }
         case ("lyrics", "snapshot"):
             return decodePayload(LyricsSnapshot.self, envelope.payloadJson).map { .lyrics(.snapshot($0)) }
+        case ("lyrics", "window"):
+            return decodePayload(LyricsWindowSnapshot.self, envelope.payloadJson).map { .lyrics(.window($0)) }
+        case ("lyrics", "script"):
+            return decodePayload(LyricsScriptSnapshot.self, envelope.payloadJson).map { .lyrics(.script($0)) }
         case ("lyrics", "sync"):
             return decodePayload(LyricsPlaybackSync.self, envelope.payloadJson).map { .lyrics(.sync($0)) }
         case ("lyrics", "error"):

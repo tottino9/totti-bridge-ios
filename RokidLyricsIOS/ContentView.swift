@@ -1,29 +1,26 @@
 import SwiftUI
 import UIKit
 
-fileprivate enum LyricsInputField {
+private enum LyricsInputField {
     case spotifyClientId
+    case spotifyLyricsInput
+    case spotifyBackendURL
+    case spotifySpDc
     case musixmatchEmail
     case musixmatchPassword
-    case title
-    case artist
-    case album
-    case duration
 }
 
 struct ContentView: View {
     @EnvironmentObject private var store: LyricsRuntimeStore
     @FocusState private var focusedField: LyricsInputField?
+    @State private var showingSettings = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                spotifyPanel
-                providerPanel
-                lookupPanel
+                monitorPanel
                 lyricsPanel
-                timelinePanel
                 statusPanel
             }
             .padding(.horizontal, 18)
@@ -32,8 +29,11 @@ struct ContentView: View {
         }
         .background(Color.phosphorBackground.ignoresSafeArea())
         .foregroundStyle(Color.phosphorTextBright)
-        .onReceive(store.ticker) { _ in
-            store.tick()
+        .task {
+            store.autoConnectCxrIfNeeded()
+        }
+        .sheet(isPresented: $showingSettings) {
+            settingsSheet
         }
     }
 
@@ -57,60 +57,24 @@ struct ContentView: View {
             Spacer()
 
             Badge(text: store.providerBadge, highlighted: store.snapshot.synced)
-        }
-    }
-
-    private var lookupPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                SectionLabel(text: "TRACK")
-                Spacer()
-                Button {
-                    store.sampleTrack()
-                    focusedField = nil
-                } label: {
-                    Image(systemName: "sparkles")
-                }
-                .buttonStyle(IconButtonStyle())
-                .disabled(store.isLookingUp)
-            }
-
-            VStack(spacing: 10) {
-                FieldRow(label: "TITLE", text: $store.title, focusedField: $focusedField, field: .title)
-                FieldRow(label: "ARTIST", text: $store.artist, focusedField: $focusedField, field: .artist)
-                FieldRow(label: "ALBUM", text: $store.album, focusedField: $focusedField, field: .album)
-                FieldRow(label: "DURATION", text: $store.durationSecondsText, focusedField: $focusedField, field: .duration, keyboardType: .numberPad)
-            }
 
             Button {
                 focusedField = nil
-                Task { await store.lookup() }
+                showingSettings = true
             } label: {
-                Label(store.isLookingUp ? "SEARCHING" : "LOOKUP", systemImage: store.isLookingUp ? "hourglass" : "magnifyingglass")
-                    .frame(maxWidth: .infinity)
+                Image(systemName: "gearshape")
             }
-            .buttonStyle(PrimaryButtonStyle())
-            .disabled(!store.canLookup)
+            .buttonStyle(IconButtonStyle())
         }
-        .padding(14)
-        .surface()
     }
 
-    private var spotifyPanel: some View {
+    private var monitorPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                SectionLabel(text: "SPOTIFY")
+                SectionLabel(text: "MONITOR")
                 Spacer()
                 Badge(text: store.spotifyAuthStatus.label.uppercased(), highlighted: store.spotifyConnected)
             }
-
-            FieldRow(
-                label: "CLIENT ID",
-                text: $store.spotifyClientId,
-                focusedField: $focusedField,
-                field: .spotifyClientId,
-                capitalization: .never
-            )
 
             HStack(spacing: 10) {
                 Button {
@@ -133,32 +97,182 @@ struct ContentView: View {
             }
 
             Toggle(isOn: $store.spotifyMonitoringEnabled) {
-                Text("MONITOR")
+                Text("AUTO MONITOR")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .tracking(1.4)
                     .foregroundStyle(Color.phosphorDim)
             }
             .toggleStyle(SwitchToggleStyle(tint: Color.phosphorPrimary))
 
-            Text(store.spotifyNowPlayingLabel)
-                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                .foregroundStyle(Color.phosphorTextMid)
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(store.spotifyNowPlayingLabel)
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.phosphorTextBright)
+                    .lineLimit(2)
+
+                Text(store.currentSpotifyTrackLabel)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.phosphorTextMid)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    focusedField = nil
+                    Task { await store.fetchCurrentSpotifyLyricsNow() }
+                } label: {
+                    Label("REFETCH", systemImage: "dot.radiowaves.left.and.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(OutlineButtonStyle())
+                .disabled(!store.canFetchCurrentSpotifyLyrics)
+
+                Badge(text: store.spotifyLyricsMode.label.uppercased(), highlighted: true)
+            }
         }
         .padding(14)
         .surface()
     }
 
-    private var providerPanel: some View {
+    private var settingsSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                SectionLabel(text: "PROVIDERS")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Settings")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.phosphorTextBright)
+                    Text("Accounts / Providers")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.phosphorDim)
+                }
+
                 Spacer()
-                Text("MXM -> NETEASE -> LRCLIB")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(Color.phosphorDim)
+
+                Button {
+                    focusedField = nil
+                    showingSettings = false
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(IconButtonStyle())
             }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    spotifySettingsSection
+                    lyricsSettingsSection
+                    providerSettingsSection
+                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 28)
+            }
+        }
+        .background(Color.phosphorBackground.ignoresSafeArea())
+        .foregroundStyle(Color.phosphorTextBright)
+        .presentationDetents([.large])
+    }
+
+    private var spotifySettingsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                SectionLabel(text: "SPOTIFY ACCOUNT")
+                Spacer()
+                Badge(text: store.spotifyAuthStatus.label.uppercased(), highlighted: store.spotifyConnected)
+            }
+
+            FieldRow(
+                label: "CLIENT ID",
+                text: $store.spotifyClientId,
+                focusedField: $focusedField,
+                field: .spotifyClientId,
+                capitalization: .never
+            )
+
+            Button {
+                focusedField = nil
+                store.connectOrDisconnectSpotify()
+            } label: {
+                Label(store.spotifyButtonTitle, systemImage: store.spotifyConnected ? "xmark.circle" : "person.crop.circle.badge.plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(OutlineButtonStyle())
+        }
+        .padding(14)
+        .surface()
+    }
+
+    private var lyricsSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                SectionLabel(text: "LYRICS API")
+                Spacer()
+                Badge(text: store.spotifyLyricsMode.label.uppercased(), highlighted: true)
+            }
+
+            Picker("Spotify lyrics source", selection: $store.spotifyLyricsMode) {
+                ForEach(SpotifyLyricsSourceMode.allCases) { mode in
+                    Text(mode.label.uppercased()).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .tint(Color.phosphorPrimary)
+
+            FieldRow(
+                label: "OVERRIDE URL / ID",
+                text: $store.spotifyLyricsInput,
+                focusedField: $focusedField,
+                field: .spotifyLyricsInput,
+                capitalization: .never
+            )
+
+            if store.spotifyLyricsMode == .backend {
+                FieldRow(
+                    label: "BACKEND URL",
+                    text: $store.spotifyLyricsBackendURL,
+                    focusedField: $focusedField,
+                    field: .spotifyBackendURL,
+                    capitalization: .never,
+                    keyboardType: .URL
+                )
+            }
+
+            if store.spotifyLyricsMode == .direct {
+                SecureFieldRow(
+                    label: "SP_DC",
+                    text: $store.spotifySpDc,
+                    focusedField: $focusedField,
+                    field: .spotifySpDc
+                )
+            }
+
+            Button {
+                focusedField = nil
+                Task { await store.fetchSpotifyLyricsInput() }
+            } label: {
+                Label("FETCH OVERRIDE", systemImage: "music.note.list")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(!store.canFetchSpotifyLyricsInput)
+
+            Text(store.spotifyLyricsModeLabel)
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.phosphorTextMid)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .surface()
+    }
+
+    private var providerSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                SectionLabel(text: "FALLBACK PROVIDERS")
+            }
+
+            ProviderChainView()
 
             FieldRow(
                 label: "MUSIXMATCH EMAIL",
@@ -174,11 +288,6 @@ struct ContentView: View {
                 focusedField: $focusedField,
                 field: .musixmatchPassword
             )
-
-            Text(store.providerStatusLabel)
-                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                .foregroundStyle(Color.phosphorTextMid)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
         .surface()
@@ -200,7 +309,7 @@ struct ContentView: View {
                     .foregroundStyle(Color.phosphorTextBright)
                     .lineLimit(2)
 
-                Text(store.snapshot.artistName.isEmpty ? "Enter a track above" : store.snapshot.artistName)
+                Text(store.snapshot.artistName.isEmpty ? "Waiting for Spotify" : store.snapshot.artistName)
                     .font(.system(size: 13, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color.phosphorTextMid)
                     .lineLimit(1)
@@ -218,52 +327,10 @@ struct ContentView: View {
         .surface()
     }
 
-    private var timelinePanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Button {
-                    store.togglePlayback()
-                } label: {
-                    Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-                }
-                .buttonStyle(RoundButtonStyle(highlighted: store.hasLyrics))
-                .disabled(!store.canUseLocalControls)
-
-                Button {
-                    store.restart()
-                } label: {
-                    Image(systemName: "backward.end.fill")
-                }
-                .buttonStyle(RoundButtonStyle(highlighted: false))
-                .disabled(!store.canUseLocalControls)
-
-                Slider(
-                    value: Binding(
-                        get: { store.progressFraction },
-                        set: { store.seek(to: $0) }
-                    ),
-                    in: 0...1
-                )
-                .tint(Color.phosphorPrimary)
-                .disabled(!store.canUseLocalControls)
-            }
-
-            HStack {
-                Text(store.snapshot.sessionState.rawValue)
-                Spacer()
-                Text(timeText(store.timelineDurationMs))
-            }
-            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(Color.phosphorDim)
-        }
-        .padding(14)
-        .surface()
-    }
-
     private var statusPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                SectionLabel(text: "STATUS")
+                SectionLabel(text: "LOG")
                 Spacer()
                 Circle()
                     .fill(store.snapshot.errorMessage == nil ? Color.phosphorPrimary : Color.phosphorWarning)
@@ -280,10 +347,23 @@ struct ContentView: View {
                 .foregroundStyle(Color.phosphorTextGhost)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Text(store.providerStatusLabel)
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.phosphorTextGhost)
+                .fixedSize(horizontal: false, vertical: true)
+
             Text(store.deviceStatus.statusLabel)
                 .font(.system(size: 11, weight: .regular, design: .monospaced))
                 .foregroundStyle(Color.phosphorTextGhost)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                store.connectCxr()
+            } label: {
+                Label("CONNECT CXR-L", systemImage: "link")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(OutlineButtonStyle())
         }
         .padding(14)
         .surface()
@@ -396,6 +476,59 @@ private struct LyricLineView: View {
     }
 }
 
+private struct ProviderChainView: View {
+    private let steps = [
+        ("1", "LRCLIB", "public synced/plain lookup"),
+        ("2", "NETEASE", "secondary lyric search"),
+        ("3", "MUSIXMATCH", "uses credentials below"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Used only when Spotify lyrics miss.")
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.phosphorTextMid)
+
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                ProviderStepRow(number: step.0, name: step.1, detail: step.2)
+                if index < steps.count - 1 {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.phosphorDim)
+                        .padding(.leading, 9)
+                }
+            }
+        }
+    }
+}
+
+private struct ProviderStepRow: View {
+    let number: String
+    let name: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(number)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color.phosphorBackground)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(Color.phosphorPrimary))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(Color.phosphorTextBright)
+                Text(detail)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.phosphorTextMid)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private struct SectionLabel: View {
     let text: String
 
@@ -475,25 +608,6 @@ private struct IconButtonStyle: ButtonStyle {
                     .overlay(
                         RoundedRectangle(cornerRadius: 7)
                             .stroke(Color.phosphorDim.opacity(0.7), lineWidth: 1)
-                    )
-            )
-    }
-}
-
-private struct RoundButtonStyle: ButtonStyle {
-    var highlighted: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 14, weight: .bold))
-            .foregroundStyle(highlighted ? Color.phosphorBackground : Color.phosphorDim)
-            .frame(width: 42, height: 42)
-            .background(
-                Circle()
-                    .fill(highlighted ? (configuration.isPressed ? Color.phosphorMid : Color.phosphorPrimary) : Color.phosphorPressed)
-                    .overlay(
-                        Circle()
-                            .stroke(highlighted ? Color.phosphorPrimary : Color.phosphorDim.opacity(0.45), lineWidth: 1)
                     )
             )
     }

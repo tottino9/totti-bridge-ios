@@ -8,9 +8,11 @@ This repository is intentionally set up for GitHub Actions IPA builds. The iOS v
 
 - Spotify Web API OAuth PKCE login with currently-playing polling.
 - Manual track lookup by title, artist, album, and optional duration.
-- Lyrics provider chain: `Musixmatch -> Netease -> LRCLIB`.
+- Lyrics provider chain for Spotify tracks: `Spotify color-lyrics -> LRCLIB -> Netease -> Musixmatch`.
+- Manual title/artist lookup still uses `LRCLIB -> Netease -> Musixmatch`.
 - Local timeline controls for play, pause, restart, and scrub.
 - Swift models for the Android wire protocol (`snapshot`, `sync`, status, hello/ack).
+- Rokid CXR-L client integration via CocoaPods `RGCxrClient`.
 - GitHub Actions unsigned, resignable, and optional signed IPA artifacts.
 
 ## iOS constraint
@@ -27,13 +29,41 @@ rokidlyrics://spotify-callback
 
 Paste the Spotify Client ID into the app, then tap Connect. No client secret is used in the iOS app.
 
+## Spotify lyrics source
+
+The app has a separate `SPOTIFY LYRICS` panel for synced lyrics. The normal flow uses the existing Spotify Web API integration: connect Spotify, keep `MONITOR` enabled, and let the app read the currently playing track automatically. When the Spotify track changes, the current track ID from the now-playing payload is passed into the lyrics provider chain without requiring a manual fetch. `REFETCH CURRENT SPOTIFY` and the URL/ID field are manual debug/override paths.
+
+Modes:
+
+- `Backend`: recommended for prototypes. Run a private backend at the configured base URL. The app calls `GET {baseURL}/{trackId}` and expects either Spotify's raw `color-lyrics/v2` JSON or a wrapper with `lyrics.syncType` and `lyrics.lines`. The backend owns `sp_dc`, refreshes the bearer token through `https://open.spotify.com/api/token`, and calls `https://spclient.wg.spotify.com/color-lyrics/v2/track/{trackId}?format=json&market=from_token`.
+- `Direct`: full local iOS mode. Paste your own `sp_dc` into the secure field. The value is stored in iOS Keychain only, then used to fetch a short-lived bearer token and Spotify color-lyrics JSON directly from the app. The Spotify OAuth login does not expose `sp_dc`; it is only used for currently-playing metadata.
+
+Safety rules:
+
+- Never hardcode `sp_dc`.
+- Never commit `sp_dc`, bearer tokens, cookies, or request headers.
+- Do not log secrets. The app logs only HTTP status, content type, `syncType`, token length, and line count.
+- Do not extract `sp_dc` from Spotify iOS, jailbreak, MITM, or sandbox bypasses. The user must provide their own cookie explicitly.
+- Spotify `spclient` and `color-lyrics` are internal APIs. They can change without notice and their use may violate Spotify terms, so keep this path private/prototype-only.
+
+The current Rokid iOS SDK exposed by `RGCxrClient` provides `openCustomView/updateCustomView` and `sendCustomCmd`, but no dedicated subtitle API. This prototype keeps the existing custom-app helper path: iOS sends lyric snapshots/windows/sync over CXR-L custom commands or BLE, and the glasses helper owns text layout.
+
 ## Build
+
+The project uses XcodeGen plus CocoaPods:
+
+```bash
+xcodegen generate
+pod install
+open RokidLyricsIOS.xcworkspace
+```
 
 The workflow builds on `macos-15` with XcodeGen:
 
 ```bash
 xcodegen generate
-xcodebuild -project RokidLyricsIOS.xcodeproj -scheme RokidLyricsIOS -configuration Release -sdk iphoneos -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build
+pod install
+xcodebuild -workspace RokidLyricsIOS.xcworkspace -scheme RokidLyricsIOS -configuration Release -sdk iphoneos -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build
 ```
 
 From Windows, `builder-windows-amd64.exe` can trigger GitHub Actions:

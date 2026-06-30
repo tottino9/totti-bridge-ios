@@ -1,4 +1,6 @@
+import CommonCrypto
 import Foundation
+import Security
 
 struct NeteaseLyricsProvider: LyricsProvider {
     let providerName = "NETEASE"
@@ -44,6 +46,30 @@ struct NeteaseLyricsProvider: LyricsProvider {
     }
 
     private func searchTracks(query: String) async throws -> [NeteaseTrack] {
+        if let tracks = try? await officialSearchTracks(query: query) {
+            return tracks
+        }
+        return try await legacySearchTracks(query: query)
+    }
+
+    private func officialSearchTracks(query: String) async throws -> [NeteaseTrack]? {
+        let json = try await postWeapiJSON(
+            url: Self.officialSearchURL,
+            payload: [
+                "csrf_token": "",
+                "s": query,
+                "offset": 0,
+                "type": 1,
+                "limit": Self.searchLimit
+            ]
+        )
+        guard json.int("code") == 200 else { return nil }
+        let result = json["result"] as? [String: Any]
+        let songs = result?["songs"] as? [[String: Any]] ?? []
+        return songs.compactMap { $0.toNeteaseTrack() }
+    }
+
+    private func legacySearchTracks(query: String) async throws -> [NeteaseTrack] {
         var components = URLComponents(string: "https://music.163.com/api/search/get/")!
         components.queryItems = [
             URLQueryItem(name: "csrf_token", value: ""),
@@ -63,6 +89,29 @@ struct NeteaseLyricsProvider: LyricsProvider {
     }
 
     private func fetchLyricPayload(trackId: Int64) async throws -> NeteaseLyricPayload? {
+        if let payload = try? await officialLyricPayload(trackId: trackId) {
+            return payload
+        }
+        return try await legacyLyricPayload(trackId: trackId)
+    }
+
+    private func officialLyricPayload(trackId: Int64) async throws -> NeteaseLyricPayload? {
+        let json = try await postWeapiJSON(
+            url: Self.officialLyricURL,
+            payload: [
+                "OS": "pc",
+                "id": trackId,
+                "lv": -1,
+                "kv": -1,
+                "tv": -1,
+                "rv": -1
+            ]
+        )
+        guard json.int("code") == 200 else { return nil }
+        return lyricPayload(from: json)
+    }
+
+    private func legacyLyricPayload(trackId: Int64) async throws -> NeteaseLyricPayload? {
         var components = URLComponents(string: "https://music.163.com/api/song/lyric")!
         components.queryItems = [
             URLQueryItem(name: "os", value: "pc"),
@@ -73,6 +122,10 @@ struct NeteaseLyricsProvider: LyricsProvider {
         ]
         let json = try await getJSON(url: components.url!, extraHeaders: ["Cookie": "appver=1.5.0.75771;"])
         guard json.int("code") == 200 else { return nil }
+        return lyricPayload(from: json)
+    }
+
+    private func lyricPayload(from json: [String: Any]) -> NeteaseLyricPayload {
         return NeteaseLyricPayload(
             lrc: ((json["lrc"] as? [String: Any])?["lyric"] as? String).orEmpty,
             klyric: ((json["klyric"] as? [String: Any])?["lyric"] as? String).orEmpty,
@@ -81,8 +134,41 @@ struct NeteaseLyricsProvider: LyricsProvider {
         )
     }
 
+    private func postWeapiJSON(url: String, payload: [String: Any]) async throws -> [String: Any] {
+        let requestJSON = try Self.jsonString(payload)
+        let secretKey = Self.createSecretKey(length: Self.secretKeyLength)
+        let params = try Self.aesEncode(
+            Self.aesEncode(requestJSON, secret: Self.nonce),
+            secret: secretKey
+        )
+        let encSecKey = try Self.rsaEncode(secretKey)
+
+        var form = URLComponents()
+        form.queryItems = [
+            URLQueryItem(name: "params", value: params),
+            URLQueryItem(name: "encSecKey", value: encSecKey)
+        ]
+
+        var request = URLRequest(url: URL(string: url)!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 4
+        request.setValue("https://music.163.com", forHTTPHeaderField: "Referer")
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+
+        let (data, response) = try await session.data(for: request)
+        let httpCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(httpCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return json
+    }
+
     private func getJSON(url: URL, extraHeaders: [String: String]) async throws -> [String: Any] {
         var request = URLRequest(url: url)
+        request.timeoutInterval = 4
         request.setValue("https://music.163.com", forHTTPHeaderField: "Referer")
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         extraHeaders.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
@@ -238,8 +324,143 @@ struct NeteaseLyricsProvider: LyricsProvider {
         instrumentalMarkers.contains { text.caseInsensitiveCompare($0) == .orderedSame }
     }
 
+    private static func jsonString(_ payload: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw NeteaseCryptoError.invalidPayload
+        }
+        return value
+    }
+
+    private static func createSecretKey(length: Int) -> String {
+        let alphabet = Array(secretKeyAlphabet)
+        var randomBytes = [UInt8](repeating: 0, count: length)
+        let status = SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes)
+        if status != errSecSuccess {
+            return UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(length).description
+        }
+        return String(randomBytes.map { alphabet[Int($0) % alphabet.count] })
+    }
+
+    private static func aesEncode(_ value: String, secret: String) throws -> String {
+        let data = Data(value.utf8)
+        let key = Data(secret.utf8)
+        let iv = Data(aesIV.utf8)
+        let outputCapacity = data.count + kCCBlockSizeAES128
+        var output = Data(count: outputCapacity)
+        var outputLength = 0
+
+        let status = output.withUnsafeMutableBytes { outputBuffer in
+            data.withUnsafeBytes { dataBuffer in
+                key.withUnsafeBytes { keyBuffer in
+                    iv.withUnsafeBytes { ivBuffer in
+                        CCCrypt(
+                            CCOperation(kCCEncrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBuffer.baseAddress,
+                            kCCKeySizeAES128,
+                            ivBuffer.baseAddress,
+                            dataBuffer.baseAddress,
+                            data.count,
+                            outputBuffer.baseAddress,
+                            outputCapacity,
+                            &outputLength
+                        )
+                    }
+                }
+            }
+        }
+
+        guard status == kCCSuccess else {
+            throw NeteaseCryptoError.aesFailed(status)
+        }
+        output.removeSubrange(outputLength..<output.count)
+        return output.base64EncodedString()
+    }
+
+    private static func rsaEncode(_ value: String) throws -> String {
+        guard let publicKey = rsaPublicKey else {
+            throw NeteaseCryptoError.rsaKeyCreationFailed
+        }
+        let reversed = String(value.reversed())
+        guard let data = reversed.data(using: .utf8) else {
+            throw NeteaseCryptoError.invalidPayload
+        }
+        var error: Unmanaged<CFError>?
+        guard let encrypted = SecKeyCreateEncryptedData(publicKey, .rsaEncryptionRaw, data as CFData, &error) as Data? else {
+            throw NeteaseCryptoError.rsaFailed(error?.takeRetainedValue())
+        }
+        return encrypted.hexLowercased()
+    }
+
+    private static let rsaPublicKey: SecKey? = {
+        let modulus = hexBytes(rsaModulusHex)
+        let exponent = hexBytes(rsaPublicExponentHex)
+        let keyData = derSequence(derInteger(modulus) + derInteger(exponent))
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
+            kSecAttrKeySizeInBits as String: rsaKeySizeBits
+        ]
+        return SecKeyCreateWithData(Data(keyData) as CFData, attributes as CFDictionary, nil)
+    }()
+
+    private static func hexBytes(_ hex: String) -> [UInt8] {
+        var bytes: [UInt8] = []
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            if let byte = UInt8(hex[index..<next], radix: 16) {
+                bytes.append(byte)
+            }
+            index = next
+        }
+        return bytes
+    }
+
+    private static func derSequence(_ content: [UInt8]) -> [UInt8] {
+        [0x30] + derLength(content.count) + content
+    }
+
+    private static func derInteger(_ value: [UInt8]) -> [UInt8] {
+        var normalized = value
+        while normalized.count > 1,
+              normalized[0] == 0,
+              (normalized[1] & 0x80) == 0 {
+            normalized.removeFirst()
+        }
+        if let first = normalized.first, (first & 0x80) != 0 {
+            normalized.insert(0, at: 0)
+        }
+        return [0x02] + derLength(normalized.count) + normalized
+    }
+
+    private static func derLength(_ length: Int) -> [UInt8] {
+        if length < 128 {
+            return [UInt8(length)]
+        }
+        var value = length
+        var bytes: [UInt8] = []
+        while value > 0 {
+            bytes.insert(UInt8(value & 0xff), at: 0)
+            value >>= 8
+        }
+        return [0x80 | UInt8(bytes.count)] + bytes
+    }
+
+    private static let officialSearchURL = "https://music.163.com/weapi/search/get"
+    private static let officialLyricURL = "https://music.163.com/weapi/song/lyric?csrf_token="
+    private static let searchLimit = 20
     private static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     private static let variantRegex = "\\b(remix|live|cover|instrumental|inst|version|ver|bootleg|edit)\\b|\u{4f34}\u{594f}|\u{7ffb}\u{5531}|\u{539f}\u{5531}|\u{7248}|\u{73b0}\u{573a}|dj"
+    private static let secretKeyLength = 16
+    private static let secretKeyAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    private static let nonce = "0CoJUm6Qyw8W8jud"
+    private static let aesIV = "0102030405060708"
+    private static let rsaKeySizeBits = 1024
+    private static let rsaPublicExponentHex = "010001"
+    private static let rsaModulusHex = "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7"
     private static let creditPrefixes = [
         "\u{4f5c}\u{8bcd}", "\u{4f5c}\u{66f2}", "\u{7f16}\u{66f2}", "\u{5236}\u{4f5c}\u{4eba}",
         "\u{76d1}\u{5236}", "\u{6df7}\u{97f3}", "\u{6bcd}\u{5e26}", "\u{548c}\u{58f0}", "\u{5f55}\u{97f3}",
@@ -251,6 +472,13 @@ struct NeteaseLyricsProvider: LyricsProvider {
         "\u{7d14}\u{97f3}\u{6a02}\u{ff0c}\u{8acb}\u{6b23}\u{8cde}",
         "instrumental"
     ]
+}
+
+private enum NeteaseCryptoError: Error {
+    case invalidPayload
+    case aesFailed(CCCryptorStatus)
+    case rsaKeyCreationFailed
+    case rsaFailed(CFError?)
 }
 
 private struct NeteaseTrack: Equatable {
@@ -350,5 +578,11 @@ private extension Array where Element == LyricsLine {
         return filter { line in
             seen.insert("\(line.startTimeMs)|\(line.text)").inserted
         }
+    }
+}
+
+private extension Data {
+    func hexLowercased() -> String {
+        map { String(format: "%02x", $0) }.joined()
     }
 }

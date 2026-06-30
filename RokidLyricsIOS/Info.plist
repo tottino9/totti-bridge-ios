@@ -24,6 +24,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>rokidlyrics</string>
+				<string>cxrl</string>
 			</array>
 		</dict>
 	</array>
@@ -35,15 +36,28 @@
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Rokid Lyrics uses Bluetooth to send synced lyrics to nearby Rokid glasses.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Rokid Lyrics requests Rokid CXR-L camera scope so the glasses link can authorize custom app transport.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Rokid Lyrics uses the local network when the Rokid CXR-L session opens a direct link to the glasses.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Rokid Lyrics requests Rokid CXR-L microphone scope so the glasses link can authorize custom app transport.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>rokidai</string>
+		<string>cxrl</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>bluetooth-central</string>
-	</array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>bluetooth-central</string>
+        <string>bluetooth-peripheral</string>
+    </array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

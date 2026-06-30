@@ -1,0 +1,18 @@
+included:
+  - RokidLyricsIOS
+  - RokidLyricsIOSTests
+excluded:
+  - Pods
+  - build
+  - DerivedData
+disabled_rules:
+  - trailing_whitespace
+  - trailing_comma
+  - opening_brace
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - line_length
+  - nesting
+  - optional_data_string_conversion

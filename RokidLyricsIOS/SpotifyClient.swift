@@ -32,6 +32,7 @@ enum SpotifyClientError: LocalizedError {
     case userNotAllowlisted
     case rateLimited(String)
     case unsupportedItem
+    case requestTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -51,6 +52,8 @@ enum SpotifyClientError: LocalizedError {
             return "Spotify rate limit hit. Retry after \(wait)."
         case .unsupportedItem:
             return "Spotify is playing an episode or unsupported item."
+        case .requestTimedOut:
+            return "Spotify request timed out."
         }
     }
 }
@@ -98,7 +101,7 @@ final class SpotifyClient: ObservableObject {
         }
     }
 
-    init(defaults: UserDefaults = .standard, session: URLSession = .shared) {
+    init(defaults: UserDefaults = .standard, session: URLSession = SpotifyClient.makeDefaultSession()) {
         self.defaults = defaults
         self.session = session
         self.clientId = defaults.string(forKey: Keys.clientId) ?? ""
@@ -166,12 +169,13 @@ final class SpotifyClient: ObservableObject {
 
     func fetchCurrentlyPlaying() async throws -> SpotifyPlayback? {
         let accessToken = try await validAccessToken()
-        var components = URLComponents(string: "https://api.spotify.com/v1/me/player/currently-playing")!
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/player")!
         components.queryItems = [URLQueryItem(name: "additional_types", value: "track")]
         var request = URLRequest(url: components.url!)
+        request.timeoutInterval = Tuning.playbackRequestTimeoutSeconds
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await data(for: request, timeoutSeconds: Tuning.playbackRequestTimeoutSeconds)
         guard let http = response as? HTTPURLResponse else {
             throw SpotifyClientError.noActivePlayback
         }
@@ -256,13 +260,14 @@ final class SpotifyClient: ObservableObject {
     private func tokenRequest(body: [String: String]) async throws -> TokenState {
         var request = URLRequest(url: URL(string: "https://accounts.spotify.com/api/token")!)
         request.httpMethod = "POST"
+        request.timeoutInterval = Tuning.tokenRequestTimeoutSeconds
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
             .map { "\($0.key.urlFormEncoded)=\($0.value.urlFormEncoded)" }
             .joined(separator: "&")
             .data(using: .utf8)
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await data(for: request, timeoutSeconds: Tuning.tokenRequestTimeoutSeconds)
         let httpCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(httpCode) else {
             let message = String(data: data, encoding: .utf8) ?? "HTTP \(httpCode)"
@@ -274,6 +279,34 @@ final class SpotifyClient: ObservableObject {
             refreshToken: payload.refreshToken ?? "",
             expiresAt: Date().addingTimeInterval(TimeInterval(payload.expiresIn))
         )
+    }
+
+    private func data(for request: URLRequest, timeoutSeconds: TimeInterval) async throws -> (Data, URLResponse) {
+        try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+            group.addTask { [session] in
+                try await session.data(for: request)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                throw SpotifyClientError.requestTimedOut
+            }
+
+            guard let result = try await group.next() else {
+                throw SpotifyClientError.requestTimedOut
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    nonisolated private static func makeDefaultSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = Tuning.playbackRequestTimeoutSeconds
+        configuration.timeoutIntervalForResource = Tuning.tokenRequestTimeoutSeconds
+        configuration.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: configuration)
     }
 
     private static func codeChallenge(for verifier: String) -> String {
@@ -297,6 +330,11 @@ final class SpotifyClient: ObservableObject {
         }
         return String(bytes.map { alphabet[Int($0) % alphabet.count] })
     }
+}
+
+private enum Tuning {
+    static let playbackRequestTimeoutSeconds: TimeInterval = 4
+    static let tokenRequestTimeoutSeconds: TimeInterval = 8
 }
 
 private struct TokenState: Codable {

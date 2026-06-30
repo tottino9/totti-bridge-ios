@@ -50,24 +50,58 @@ struct LrcLibLyricsClient: LyricsProvider {
             throw LyricsClientError.missingRequiredFields
         }
 
-        if let cached = try await fetchTrack(path: "/api/get-cached", request: normalized) {
-            return parse(track: cached, request: normalized)
-        }
-
-        if let exact = try await fetchTrack(path: "/api/get", request: normalized) {
-            return parse(track: exact, request: normalized)
-        }
-
-        if let search = try await fetchSearchFallback(request: normalized) {
-            return parse(track: search, request: normalized)
+        if let track = try await fetchFastestTrack(request: normalized) {
+            return parse(track: track, request: normalized)
         }
 
         throw LyricsClientError.noLyricsFound
     }
 
+    private func fetchFastestTrack(request: LyricsLookupRequest) async throws -> LrcLibTrack? {
+        let outcomes: (track: LrcLibTrack?, failures: [Error]) = await withTaskGroup(of: LrcLibLookupOutcome.self) { group in
+            group.addTask {
+                do {
+                    return .finished(try await fetchTrack(path: "/api/get", request: request))
+                } catch {
+                    return .failed(error)
+                }
+            }
+            group.addTask {
+                do {
+                    return .finished(try await fetchSearchFallback(request: request))
+                } catch {
+                    return .failed(error)
+                }
+            }
+
+            var failures: [Error] = []
+            for await outcome in group {
+                switch outcome {
+                case .finished(let track):
+                    if let track {
+                        group.cancelAll()
+                        return (track, failures)
+                    }
+                case .failed(let error):
+                    failures.append(error)
+                }
+            }
+            return (LrcLibTrack?.none, failures)
+        }
+
+        if let track = outcomes.track {
+            return track
+        }
+        if let error = outcomes.failures.last {
+            throw error
+        }
+        return nil
+    }
+
     private func fetchTrack(path: String, request: LyricsLookupRequest) async throws -> LrcLibTrack? {
         guard let url = url(path: path, request: request) else { return nil }
         var urlRequest = URLRequest(url: url)
+        urlRequest.timeoutInterval = Self.endpointTimeoutSeconds
         urlRequest.setValue("Rokid-Lyrics-iOS/0.1", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -91,6 +125,7 @@ struct LrcLibLyricsClient: LyricsProvider {
         guard let url = components?.url else { return nil }
 
         var urlRequest = URLRequest(url: url)
+        urlRequest.timeoutInterval = Self.endpointTimeoutSeconds
         urlRequest.setValue("Rokid-Lyrics-iOS/0.1", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -203,6 +238,13 @@ struct LrcLibLyricsClient: LyricsProvider {
         components?.queryItems = items
         return components?.url
     }
+
+    private static let endpointTimeoutSeconds: TimeInterval = 8.5
+}
+
+private enum LrcLibLookupOutcome {
+    case finished(LrcLibTrack?)
+    case failed(Error)
 }
 
 private struct LrcLibTrack: Decodable {

@@ -32,16 +32,7 @@ enum LrcParser {
     }
 
     static func index(for lines: [LyricsLine], progressMs: Int64) -> Int {
-        guard !lines.isEmpty else { return -1 }
-        var candidate = -1
-        for (index, line) in lines.enumerated() {
-            if line.startTimeMs <= progressMs {
-                candidate = index
-            } else {
-                break
-            }
-        }
-        return candidate
+        LyricsScheduler.index(for: lines, progressMs: progressMs)
     }
 }
 

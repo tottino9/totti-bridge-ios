@@ -19,6 +19,9 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     private var txCharacteristic: CBCharacteristic?
     private var outgoingFrames: [Data] = []
     private var writeInFlight = false
+    private var inFlightFrame: Data?
+    private var inFlightRetries = 0
+    private let maxFrameRetries = 4
     private var nextMessageId = UInt32.random(in: 1..<UInt32.max)
     private var repairTimer: Timer?
     private var linkStartedAt: Date?
@@ -55,7 +58,10 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         let frames = BleWireFramer.encode(message: json, messageId: nextMessageId, maxPacketSize: packetSize)
         nextMessageId &+= 1
         guard !frames.isEmpty else { return }
+        print("[RokidLyricsBLE] send bytes=\(json.utf8.count) frames=\(frames.count) packetSize=\(packetSize) priority=\(priority) queued=\(outgoingFrames.count)")
         if priority {
+            // A priority message supersedes anything still queued, but not a frame
+            // already on the wire (its write callback will pump the new queue).
             outgoingFrames.removeAll()
             outgoingFrames.append(contentsOf: frames)
         } else {
@@ -165,7 +171,14 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
     }
 
     private func maxPacketSize() -> Int {
-        20
+        // Use the negotiated ATT MTU instead of the 23-byte default. The value for
+        // `.withoutResponse` is exactly ATT_MTU - 3, so sizing each `.withResponse`
+        // frame to it keeps every write in a single GATT packet (no long writes) —
+        // which the glasses reassembler can receive intact — while cutting a song
+        // window from dozens of 11-byte chunks down to a handful.
+        guard let peripheral else { return 20 }
+        let writable = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        return max(20, min(writable, 512))
     }
 
     private func pumpWriteQueue() {
@@ -176,6 +189,7 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
               !outgoingFrames.isEmpty else { return }
 
         let frame = outgoingFrames.removeFirst()
+        inFlightFrame = frame
         writeInFlight = true
         peripheral.writeValue(frame, for: rxCharacteristic, type: .withResponse)
     }
@@ -196,6 +210,8 @@ final class LyricsBleCentralTransport: NSObject, ObservableObject {
         txCharacteristic = nil
         outgoingFrames.removeAll()
         writeInFlight = false
+        inFlightFrame = nil
+        inFlightRetries = 0
         nextMessageId = UInt32.random(in: 1..<UInt32.max)
         linkStartedAt = nil
         resolvingGatt = false
@@ -359,6 +375,8 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
             if characteristic.uuid == txUUID, characteristic.isNotifying {
                 outgoingFrames.removeAll()
                 writeInFlight = false
+                inFlightFrame = nil
+                inFlightRetries = 0
                 nextMessageId = UInt32.random(in: 1..<UInt32.max)
                 linkStartedAt = nil
                 reassembler.clear()
@@ -391,10 +409,29 @@ extension LyricsBleCentralTransport: CBPeripheralDelegate {
             guard isCurrent(peripheral) else { return }
             writeInFlight = false
             if let error {
+                // Retry the same frame a few times before giving up. Re-sending a
+                // frame is safe: the glasses reassembler keys by messageId+chunkIndex,
+                // so a duplicate just overwrites the same slot. This stops a single
+                // transient write error from silently dropping a whole window/script.
+                if inFlightRetries < maxFrameRetries, let frame = inFlightFrame, peripheral.state == .connected {
+                    inFlightRetries += 1
+                    logger.warning("BLE write failed (retry \(self.inFlightRetries)/\(self.maxFrameRetries)): \(error.localizedDescription, privacy: .public)")
+                    outgoingFrames.insert(frame, at: 0)
+                    inFlightFrame = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                        Task { @MainActor in self?.pumpWriteQueue() }
+                    }
+                    return
+                }
+                logger.error("BLE write failed permanently; dropping queue: \(error.localizedDescription, privacy: .public)")
+                inFlightFrame = nil
+                inFlightRetries = 0
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "BLE write failed: \(error.localizedDescription)")
                 outgoingFrames.removeAll()
                 return
             }
+            inFlightFrame = nil
+            inFlightRetries = 0
             pumpWriteQueue()
         }
     }

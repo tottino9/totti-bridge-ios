@@ -20,6 +20,14 @@ extension Dictionary where Key == String, Value == Any {
         return nil
     }
 
+    func double(_ key: String) -> Double? {
+        if let value = self[key] as? Double { return value }
+        if let value = self[key] as? Int { return Double(value) }
+        if let value = self[key] as? Int64 { return Double(value) }
+        if let value = self[key] as? String { return Double(value) }
+        return nil
+    }
+
     func truthy(_ key: String) -> Bool {
         if let value = self[key] as? Bool { return value }
         if let value = self[key] as? Int { return value != 0 }

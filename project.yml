@@ -19,6 +19,8 @@ targets:
     platform: iOS
     sources:
       - path: RokidLyricsIOS
+    resources:
+      - path: RokidLyricsIOS/Resources
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -27,6 +29,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.anezium.rokidlyrics
         PRODUCT_NAME: RokidLyricsIOS
         INFOPLIST_FILE: RokidLyricsIOS/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 32BW73UGAZ
 
   RokidLyricsIOSTests:
     type: bundle.unit-test
@@ -39,6 +43,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.anezium.rokidlyrics.tests
         GENERATE_INFOPLIST_FILE: "YES"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 32BW73UGAZ
 
 schemes:
   RokidLyricsIOS:

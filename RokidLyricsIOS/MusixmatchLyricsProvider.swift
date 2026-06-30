@@ -10,6 +10,7 @@ struct MusixmatchLyricsProvider: LyricsProvider {
     let providerName = "MUSIXMATCH"
     var credentials: MusixmatchCredentials?
     var session: URLSession = .shared
+    private static let sessionCache = MusixmatchSessionCache()
 
     func fetch(_ request: LyricsLookupRequest) async -> LyricsProviderAttempt {
         guard let credentials,
@@ -19,8 +20,7 @@ struct MusixmatchLyricsProvider: LyricsProvider {
         }
 
         do {
-            let userToken = try await fetchUserToken()
-            try await login(credentials: credentials, userToken: userToken)
+            let userToken = try await authenticatedUserToken(credentials: credentials)
             guard let track = try await resolveBestTrack(request, userToken: userToken) else {
                 return .noMatch(provider: providerName, reason: "No Musixmatch match with line-synced subtitles for \(request.title) by \(request.artist).")
             }
@@ -46,6 +46,24 @@ struct MusixmatchLyricsProvider: LyricsProvider {
             )
         } catch {
             return .noMatch(provider: providerName, reason: error.localizedDescription)
+        }
+    }
+
+    private func authenticatedUserToken(credentials: MusixmatchCredentials) async throws -> String {
+        if let cachedToken = try await Self.sessionCache.validUserToken(for: credentials) {
+            return cachedToken
+        }
+
+        do {
+            let userToken = try await fetchUserToken()
+            try await login(credentials: credentials, userToken: userToken)
+            await Self.sessionCache.save(userToken: userToken, credentials: credentials)
+            return userToken
+        } catch {
+            if MusixmatchError.isCaptchaRelated(error) {
+                await Self.sessionCache.noteCaptcha()
+            }
+            throw error
         }
     }
 
@@ -177,6 +195,7 @@ struct MusixmatchLyricsProvider: LyricsProvider {
 
         var request = URLRequest(url: components.url!)
         request.httpMethod = method
+        request.timeoutInterval = 4
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("Keep-Alive", forHTTPHeaderField: "Connection")
         request.setValue("default", forHTTPHeaderField: "x-mxm-endpoint")
@@ -193,6 +212,9 @@ struct MusixmatchLyricsProvider: LyricsProvider {
         let statusCode = header?["status_code"] as? Int ?? httpCode
         guard statusCode == 200 else {
             let hint = header?["hint"] as? String
+            if statusCode == 401, hint?.localizedCaseInsensitiveContains("captcha") == true {
+                throw MusixmatchError.captcha(endpoint: endpoint)
+            }
             throw MusixmatchError.message("Musixmatch \(endpoint) failed (\(statusCode)): \(hint ?? "unknown error")")
         }
         return json
@@ -247,6 +269,20 @@ struct MusixmatchLyricsProvider: LyricsProvider {
         return Data(digest)
     }
 
+    fileprivate static func credentialCacheKey(_ credentials: MusixmatchCredentials) -> String {
+        let normalizedEmail = credentials.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return sha256Hex("\(normalizedEmail)\u{0}\(credentials.password)")
+    }
+
+    private static func sha256Hex(_ value: String) -> String {
+        let data = Data(value.utf8)
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { buffer in
+            _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     private static let baseURL = "https://apic.musixmatch.com/ws/1.1/"
     private static let appId = "android-player-v1.0"
     private static let signingKey = "IEJ5E8XFaHQvIQNfs7IC"
@@ -269,6 +305,80 @@ struct MusixmatchLyricsProvider: LyricsProvider {
     }()
 }
 
+private actor MusixmatchSessionCache {
+    private var cachedSession: MusixmatchSession?
+    private var captchaCooldownUntil: Date?
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let userToken = defaults.string(forKey: Keys.userToken),
+           let credentialKey = defaults.string(forKey: Keys.credentialKey),
+           let expiresAt = defaults.object(forKey: Keys.expiresAt) as? Date {
+            cachedSession = MusixmatchSession(
+                credentialKey: credentialKey,
+                userToken: userToken,
+                expiresAt: expiresAt
+            )
+        }
+    }
+
+    func validUserToken(for credentials: MusixmatchCredentials) throws -> String? {
+        if let captchaCooldownUntil, captchaCooldownUntil > Date() {
+            throw MusixmatchError.captchaCooldown
+        }
+
+        guard let cachedSession,
+              cachedSession.credentialKey == MusixmatchLyricsProvider.credentialCacheKey(credentials),
+              cachedSession.expiresAt > Date().addingTimeInterval(Self.expirySafetySeconds)
+        else {
+            return nil
+        }
+
+        return cachedSession.userToken
+    }
+
+    func save(userToken: String, credentials: MusixmatchCredentials) {
+        let session = MusixmatchSession(
+            credentialKey: MusixmatchLyricsProvider.credentialCacheKey(credentials),
+            userToken: userToken,
+            expiresAt: Date().addingTimeInterval(Self.tokenExpirySeconds)
+        )
+        cachedSession = session
+        defaults.set(session.credentialKey, forKey: Keys.credentialKey)
+        defaults.set(session.userToken, forKey: Keys.userToken)
+        defaults.set(session.expiresAt, forKey: Keys.expiresAt)
+    }
+
+    func noteCaptcha() {
+        captchaCooldownUntil = Date().addingTimeInterval(Self.captchaCooldownSeconds)
+        clearSession()
+    }
+
+    private func clearSession() {
+        cachedSession = nil
+        defaults.removeObject(forKey: Keys.credentialKey)
+        defaults.removeObject(forKey: Keys.userToken)
+        defaults.removeObject(forKey: Keys.expiresAt)
+    }
+
+    private enum Keys {
+        static let credentialKey = "musixmatch.session.credentialKey"
+        static let userToken = "musixmatch.session.userToken"
+        static let expiresAt = "musixmatch.session.expiresAt"
+    }
+
+    private static let tokenExpirySeconds: TimeInterval = 10 * 60
+    private static let expirySafetySeconds: TimeInterval = 30
+    private static let captchaCooldownSeconds: TimeInterval = 5 * 60
+}
+
+private struct MusixmatchSession: Equatable {
+    var credentialKey: String
+    var userToken: String
+    var expiresAt: Date
+}
+
 private struct MusixmatchTrack: Equatable {
     var trackId: Int64
     var trackName: String
@@ -280,11 +390,31 @@ private struct MusixmatchTrack: Equatable {
 
 private enum MusixmatchError: LocalizedError {
     case message(String)
+    case captcha(endpoint: String)
+    case captchaCooldown
 
     var errorDescription: String? {
         switch self {
-        case .message(let message): return message
+        case .message(let message):
+            return message
+        case .captcha(let endpoint):
+            return "Musixmatch \(endpoint) failed (401): captcha"
+        case .captchaCooldown:
+            return "Musixmatch captcha cooldown active; retrying later."
         }
+    }
+
+    var isCaptchaRelated: Bool {
+        switch self {
+        case .captcha, .captchaCooldown:
+            return true
+        case .message:
+            return false
+        }
+    }
+
+    static func isCaptchaRelated(_ error: Error) -> Bool {
+        (error as? MusixmatchError)?.isCaptchaRelated == true
     }
 }
 
