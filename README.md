@@ -1,10 +1,31 @@
-# Rokid Lyrics iOS
+<p align="center">
+  <img src="RokidLyricsIOS/Assets.xcassets/RokidLogo.imageset/Rokid_Lyrics_logo.png" alt="Rokid Lyrics logo" width="180" />
+</p>
 
-Native iOS companion for Rokid Lyrics.
+<h1 align="center">Rokid Lyrics iOS</h1>
+
+<p align="center">
+  Native iOS companion for Rokid Lyrics.
+</p>
+
+<p align="center">
+  <a href="https://ko-fi.com/M8R61ZTXMI" target="_blank">
+    <img height="36" style="border:0px;height:36px;" src="https://storage.ko-fi.com/cdn/kofi4.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
+  </a>
+</p>
+
+---
 
 This repository is intentionally set up for GitHub Actions IPA builds. The iOS version is a SwiftUI companion with Spotify currently-playing lookup, local synced playback preview, and shared protocol models that mirror the Android `shared-contracts` module.
 
 ## Screenshots
+
+<p align="center">
+  <img src="Docs/Images/readme-rokid-glasses.jpeg" alt="Rokid Glasses live lyrics display" width="520" />
+</p>
+<p align="center">
+  <em>Rokid Glasses live lyrics display with the iPhone companion.</em>
+</p>
 
 Redacted simulator captures. The displayed client ID, track ID, email, and provider credentials are placeholders.
 
