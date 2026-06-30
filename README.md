@@ -50,13 +50,36 @@ iOS does not expose a system-wide media-session listener like Android notificati
 
 ## Spotify setup
 
-In the Spotify Developer Dashboard, add this redirect URI to your app:
+### Getting a Spotify Client ID
+
+The iOS app uses Spotify Web API OAuth with PKCE, so it needs a Spotify Client ID but no Client Secret.
+
+1. Open the Spotify Developer Dashboard: `https://developer.spotify.com/dashboard`.
+2. Log in with your Spotify account.
+3. Click `Create app`.
+4. Enter an app name and description, for example `Rokid Lyrics iOS`.
+5. Select `Web API` when Spotify asks which APIs you plan to use.
+6. Add this Redirect URI:
 
 ```text
 rokidlyrics://spotify-callback
 ```
 
-Paste the Spotify Client ID into the app, then tap Connect. No client secret is used in the iOS app.
+7. If Spotify asks for an iOS Bundle ID, use the bundle ID of the build you are signing. The default project bundle ID is:
+
+```text
+com.anezium.rokidlyrics
+```
+
+8. Save the app.
+9. Open the app's `Settings` page in the Spotify dashboard.
+10. Copy the `Client ID`.
+11. Paste that Client ID into Rokid Lyrics iOS `Settings` -> `Spotify Account` -> `Client ID`.
+12. Tap `Connect` in Rokid Lyrics iOS and finish the Spotify login.
+
+Do not paste the Spotify Client Secret into the iOS app. This app does not use it, and mobile apps cannot safely keep a client secret private.
+
+Spotify apps start in Development Mode. If another Spotify account needs to use your app, add it in the Spotify dashboard under `Settings` -> `Users Management`; otherwise Spotify API calls for that account can fail with `403`.
 
 ## Spotify lyrics source
 
