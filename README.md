@@ -62,6 +62,25 @@ Paste the Spotify Client ID into the app, then tap Connect. No client secret is 
 
 The app has a separate `SPOTIFY LYRICS` panel for synced lyrics. The normal flow uses the existing Spotify Web API integration: connect Spotify, keep `MONITOR` enabled, and let the app read the currently playing track automatically. When the Spotify track changes, the current track ID from the now-playing payload is passed into the lyrics provider chain without requiring a manual fetch. `REFETCH CURRENT SPOTIFY` and the URL/ID field are manual debug/override paths.
 
+### Getting `sp_dc`
+
+Recommended path: use a desktop browser and keep this value private. `sp_dc` is an account session cookie, not a Spotify OAuth token.
+
+Chrome / Brave / Edge on desktop:
+
+1. Open `https://open.spotify.com/` and log in with your own Spotify account.
+2. Open DevTools with `Cmd+Option+I` on macOS, or `F12` / `Ctrl+Shift+I` on Windows.
+3. Go to `Application` -> `Storage` -> `Cookies` -> `https://open.spotify.com`.
+4. Filter for `sp_dc`.
+5. Copy only the `Value` column for `sp_dc`.
+6. Paste it into your private backend config, or into iOS `Settings` -> `Lyrics API` -> `Direct` -> `SP_DC` for full-local testing.
+
+The iOS field accepts the raw value, `sp_dc=...`, or a full `Cookie: sp_dc=...` header and normalizes it before storing it in Keychain.
+
+If `sp_dc` is missing, refresh `open.spotify.com`, log out and back in, then re-check the same Cookies table. If the app reports an anonymous token, the cookie is stale or from a logged-out web session; refresh it from a logged-in Spotify web session.
+
+On iPhone, there is no normal Spotify app or Spotify OAuth flow that exposes `sp_dc`. iOS Chrome/Safari also do not provide a simple cookie-value viewer in the browser UI. Do not try to pull it from the Spotify iOS app, jailbreak, MITM, or sandbox bypasses. A random website cannot safely extract it either: browser same-origin rules and `HttpOnly` cookies prevent a site from reading Spotify cookies. Use a desktop browser, then paste the value manually into the backend or the app.
+
 Modes:
 
 - `Backend`: recommended for prototypes. Run a private backend at the configured base URL. The app calls `GET {baseURL}/{trackId}` and expects either Spotify's raw `color-lyrics/v2` JSON or a wrapper with `lyrics.syncType` and `lyrics.lines`. The backend owns `sp_dc`, refreshes the bearer token through `https://open.spotify.com/api/token`, and calls `https://spclient.wg.spotify.com/color-lyrics/v2/track/{trackId}?format=json&market=from_token`.
