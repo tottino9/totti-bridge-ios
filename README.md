@@ -157,3 +157,9 @@ Local signing files are intentionally ignored by Git:
 Use `scripts/Set-GitHubSigningSecrets.ps1` to upload signing material into GitHub Secrets for this repo.
 
 The workflow also accepts the secret names created by `builder signing setup`, but a `BUNDLE_ID` secret is still required so the generated Xcode project matches the provisioning profile.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
+
+Contributions are accepted under the same license (Apache-2.0, section 5) — no CLA required.
