@@ -1,4 +1,5 @@
 import Combine
+import AVFoundation
 import Foundation
 import OSLog
 
@@ -30,6 +31,7 @@ final class LyricsCxrTransport: ObservableObject {
     private var lastTottiPongTime: TimeInterval?
     private var tottiRequestIDs: [String] = []
     private var tottiRequestInFlight = false
+    private let tottiSpeech = TottiSpeechPlayer()
     private let logger = Logger(subsystem: "app.nectarine4657.lime425", category: "CXR")
 
     private struct PendingMessage {
@@ -642,6 +644,9 @@ final class LyricsCxrTransport: ObservableObject {
                     }
                     print("[TottiBridge] AI answer id=\(requestID) chars=\(answer.count)")
                     self.sendTottiReply(type: "totti_answer", requestID: requestID, message: answer)
+                    self.tottiSpeech.speak(answer, requestID: requestID) { [weak self] type, message in
+                        self?.sendTottiReply(type: type, requestID: requestID, message: message)
+                    }
                 } catch {
                     print("[TottiBridge] AI request failed: \(error.localizedDescription)")
                     self.sendTottiReply(type: "totti_error", requestID: requestID,
