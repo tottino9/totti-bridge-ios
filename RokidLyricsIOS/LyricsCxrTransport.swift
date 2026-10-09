@@ -496,26 +496,153 @@ final class LyricsCxrTransport: ObservableObject {
             }
         }
 
-        private func handleNotify(_ event: RGCxrClientNotifyEvent) {
-            print("[RokidLyricsCXR] notify cmd=\(event.cmd) subCmd=\(event.subCmd) payload=\(event.payload?.count ?? 0) payloadEx=\(event.payloadEx?.count ?? 0)")
+        private func sendTottiPong() {
+
+            guard let jsonData =
+                #"{"type":"totti_pong","message":"TOTTI_PONG"}"#
+                    .data(using: .utf8)
+            else {
+                print("[TottiBridge] failed to create PONG payload")
+                return
+            }
+
+            let data =
+                CxrCapsCodec.encodeBinaryPayload(
+                    jsonData
+                )
+
+            print(
+                "[TottiBridge] sending TOTTI_PONG bytes=\(data.count)"
+            )
+
+            let callback:
+                (Bool, Data?, Int32?, String?) -> Void =
+            {
+                success,
+                _,
+                errorCode,
+                errorMessage in
+
+                print(
+                    "[TottiBridge] PONG callback success=\(success) code=\(errorCode ?? 0) message=\(errorMessage ?? "")"
+                )
+            }
+
+            let error =
+                CxrClient.shared.sendCustomCmd(
+                    cmd:
+                        TransportConstants
+                            .cxrPhoneToGlassesCommand,
+                    payload:
+                        data,
+                    callback:
+                        callback
+                )
+
+            if let error {
+
+                handleImmediateError(
+                    error,
+                    context: "totti pong"
+                )
+            }
+        }
+
+        private func handleNotify(
+            _ event: RGCxrClientNotifyEvent
+        ) {
+
+            print(
+                "[RokidLyricsCXR] notify cmd=\(event.cmd) subCmd=\(event.subCmd) payload=\(event.payload?.count ?? 0) payloadEx=\(event.payloadEx?.count ?? 0)"
+            )
+
             logger.info(
                 "CXR-L notify cmd=\(event.cmd, privacy: .public) subCmd=\(event.subCmd, privacy: .public) payload=\(event.payload?.count ?? 0) payloadEx=\(event.payloadEx?.count ?? 0)"
             )
-            guard event.cmd == TransportConstants.cxrGlassesToPhoneCommand ||
-                event.cmd == TransportConstants.cxrPhoneToGlassesCommand ||
-                event.subCmd == TransportConstants.cxrGlassesToPhoneCommand ||
-                event.subCmd == TransportConstants.cxrPhoneToGlassesCommand ||
-                event.cmd == TransportConstants.cxrLegacyLyricsCommand ||
-                event.subCmd == TransportConstants.cxrLegacyLyricsCommand else { return }
-            // The glasses send their JSON wrapped in a Caps blob (or raw); decode either form.
-            guard let data = event.payload ?? event.payloadEx,
-                  let json = CxrCapsCodec.decodeJSONPayload(data),
-                  let message = WireProtocol.decodeGlassesMessage(json)
+
+            guard
+                event.cmd ==
+                    TransportConstants
+                        .cxrGlassesToPhoneCommand ||
+
+                event.cmd ==
+                    TransportConstants
+                        .cxrPhoneToGlassesCommand ||
+
+                event.subCmd ==
+                    TransportConstants
+                        .cxrGlassesToPhoneCommand ||
+
+                event.subCmd ==
+                    TransportConstants
+                        .cxrPhoneToGlassesCommand ||
+
+                event.cmd ==
+                    TransportConstants
+                        .cxrLegacyLyricsCommand ||
+
+                event.subCmd ==
+                    TransportConstants
+                        .cxrLegacyLyricsCommand
             else {
-                logger.warning("Dropped unparseable CXR-L lyrics notify")
                 return
             }
-            onMessage?(message)
+
+            guard
+                let data =
+                    event.payload ??
+                    event.payloadEx,
+
+                let json =
+                    CxrCapsCodec
+                        .decodeJSONPayload(
+                            data
+                        )
+            else {
+
+                logger.warning(
+                    "Dropped unparseable CXR-L notify"
+                )
+
+                return
+            }
+
+            if
+                json.contains(
+                    "\"type\":\"totti_ping\""
+                ) ||
+                json.contains(
+                    "TOTTI_PING"
+                )
+            {
+
+                print(
+                    "[TottiBridge] received TOTTI_PING"
+                )
+
+                sendTottiPong()
+
+                return
+            }
+
+            guard
+                let message =
+                    WireProtocol
+                        .decodeGlassesMessage(
+                            json
+                        )
+            else {
+
+                logger.warning(
+                    "Dropped unknown CXR-L message"
+                )
+
+                return
+            }
+
+            onMessage?(
+                message
+            )
         }
 
         private func ensureCustomAppOpen(force: Bool = false) {

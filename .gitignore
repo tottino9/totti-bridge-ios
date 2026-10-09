@@ -29,3 +29,5 @@ xcuserdata/
 Pods/
 
 local.properties
+*.before_totti.bak
+*.before_totti_pingpong.bak

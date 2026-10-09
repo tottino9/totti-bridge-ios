@@ -160,9 +160,9 @@ enum TransportConstants {
     static let cxrLegacyLyricsCommand = "rokid.lyrics"
     static let cxrPhoneToGlassesCommand = "rk_custom_client"
     static let cxrGlassesToPhoneCommand = "rk_custom_key"
-    static let cxrCustomAppPackageName = "com.rokid.lyrics.glasses"
-    static let cxrCustomAppActivityPath = ".LyricsGlassesActivity"
-    static let cxrCustomAppActivityName = "com.rokid.lyrics.glasses.LyricsGlassesActivity"
+    static let cxrCustomAppPackageName = "com.helm.rode"
+    static let cxrCustomAppActivityPath = ".MainActivity"
+    static let cxrCustomAppActivityName = "com.helm.rode.MainActivity"
     static let protocolVersion = 2
 }
 
