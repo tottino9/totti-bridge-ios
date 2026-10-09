@@ -28,6 +28,8 @@ final class LyricsCxrTransport: ObservableObject {
     private let maxPendingMessages = 16
     private let maxSendAttempts = 3
     private var lastTottiPongTime: TimeInterval?
+    private var tottiRequestIDs: [String] = []
+    private var tottiRequestInFlight = false
     private let logger = Logger(subsystem: "app.nectarine4657.lime425", category: "CXR")
 
     private struct PendingMessage {
@@ -556,6 +558,113 @@ final class LyricsCxrTransport: ObservableObject {
             }
         }
 
+        private func handleTottiCommand(_ json: String) -> Bool {
+            guard let data = json.data(using: .utf8),
+                  let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let type = fields["type"] as? String
+            else { return false }
+
+            if type == "totti_ping" {
+                sendTottiPong()
+                return true
+            }
+            guard type == "totti_question" else { return false }
+            guard let requestID = fields["request_id"] as? String,
+                  !requestID.isEmpty, requestID.utf8.count <= 128,
+                  let text = fields["text"] as? String,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  text.utf8.count <= 16_000
+            else { return true }
+
+            guard !tottiRequestIDs.contains(requestID) else {
+                print("[TottiBridge] ignored duplicate question id=\(requestID)")
+                return true
+            }
+            tottiRequestIDs.append(requestID)
+            if tottiRequestIDs.count > 64 { tottiRequestIDs.removeFirst() }
+
+            guard !tottiRequestInFlight else {
+                sendTottiReply(type: "totti_error", requestID: requestID,
+                               message: "前の質問に回答中です。")
+                return true
+            }
+
+            tottiRequestInFlight = true
+            sendTottiReply(type: "totti_status", requestID: requestID,
+                           message: "AIに質問中…")
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.tottiRequestInFlight = false }
+                do {
+                    var request = URLRequest(url: URL(string:
+                        "https://totti-ai.toshiakino-9.workers.dev/glasses/chat")!)
+                    request.httpMethod = "POST"
+                    request.timeoutInterval = 60
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text])
+
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    guard let http = response as? HTTPURLResponse,
+                          (200...299).contains(http.statusCode) else {
+                        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                        self.sendTottiReply(type: "totti_error", requestID: requestID,
+                                            message: "サーバー接続エラー HTTP \(code)")
+                        return
+                    }
+                    guard let body = String(data: data, encoding: .utf8) else {
+                        self.sendTottiReply(type: "totti_error", requestID: requestID,
+                                            message: "サーバーの回答を読めませんでした。")
+                        return
+                    }
+
+                    var answer = ""
+                    var finished = false
+                    for line in body.components(separatedBy: .newlines) {
+                        guard line.hasPrefix("data:"),
+                              let eventData = String(line.dropFirst(5))
+                                .trimmingCharacters(in: .whitespaces)
+                                .data(using: .utf8),
+                              let event = (try? JSONSerialization.jsonObject(with: eventData))
+                                as? [String: Any] else { continue }
+
+                        if event["type"] as? String == "answer" {
+                            answer = event["text"] as? String ?? ""
+                        }
+                        if event["type"] as? String == "done" { finished = true }
+                    }
+
+                    guard finished, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        self.sendTottiReply(type: "totti_error", requestID: requestID,
+                                            message: "AI回答を取得できませんでした。")
+                        return
+                    }
+                    print("[TottiBridge] AI answer id=\(requestID) chars=\(answer.count)")
+                    self.sendTottiReply(type: "totti_answer", requestID: requestID, message: answer)
+                } catch {
+                    print("[TottiBridge] AI request failed: \(error.localizedDescription)")
+                    self.sendTottiReply(type: "totti_error", requestID: requestID,
+                                        message: "通信エラー。iPhoneの通信状態を確認してください。")
+                }
+            }
+            return true
+        }
+
+        private func sendTottiReply(type: String, requestID: String, message: String) {
+            guard let data = try? JSONSerialization.data(withJSONObject: [
+                "type": type, "request_id": requestID, "message": message
+            ]) else { return }
+            let error = CxrClient.shared.sendCustomCmd(
+                cmd: TransportConstants.cxrPhoneToGlassesCommand,
+                payload: data,
+                callback: { success, _, code, _ in
+                    print("[TottiBridge] \(type) callback success=\(success) code=\(code ?? 0)")
+                }
+            )
+            if let error { handleImmediateError(error, context: type) }
+        }
+
         private func handleNotify(
             _ event: RGCxrClientNotifyEvent
         ) {
@@ -596,53 +705,15 @@ final class LyricsCxrTransport: ObservableObject {
                 return
             }
 
-            // CXR-L forwards the first Caps string as subCmd. The PING
-            // can therefore arrive without either payload field populated.
-            if let subCommandData = event.subCmd.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: subCommandData),
-               let fields = object as? [String: Any],
-               fields["type"] as? String == "totti_ping" {
-                print("[TottiBridge] received TOTTI_PING via subCmd")
-                sendTottiPong()
-                return
-            }
+            if handleTottiCommand(event.subCmd) { return }
 
-            guard
-                let data =
-                    event.payload ??
-                    event.payloadEx,
-
-                let json =
-                    CxrCapsCodec
-                        .decodeJSONPayload(
-                            data
-                        )
+            guard let data = event.payload ?? event.payloadEx,
+                  let json = CxrCapsCodec.decodeJSONPayload(data)
             else {
-
-                logger.warning(
-                    "Dropped unparseable CXR-L notify"
-                )
-
+                logger.warning("Dropped unparseable CXR-L notify")
                 return
             }
-
-            if
-                json.contains(
-                    "\"type\":\"totti_ping\""
-                ) ||
-                json.contains(
-                    "TOTTI_PING"
-                )
-            {
-
-                print(
-                    "[TottiBridge] received TOTTI_PING"
-                )
-
-                sendTottiPong()
-
-                return
-            }
+            if handleTottiCommand(json) { return }
 
             guard
                 let message =
