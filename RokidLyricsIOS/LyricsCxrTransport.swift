@@ -27,6 +27,7 @@ final class LyricsCxrTransport: ObservableObject {
     private var flushRetryScheduled = false
     private let maxPendingMessages = 16
     private let maxSendAttempts = 3
+    private var lastTottiPongTime: TimeInterval?
     private let logger = Logger(subsystem: "app.nectarine4657.lime425", category: "CXR")
 
     private struct PendingMessage {
@@ -497,6 +498,14 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func sendTottiPong() {
+            // Both the legacy client and the session can deliver the same probe.
+            // Suppress repeats during one probe burst; a later probe can reply again.
+            let now = ProcessInfo.processInfo.systemUptime
+            if let previous = lastTottiPongTime, now - previous < 2 {
+                print("[TottiBridge] ignored duplicate PING within 2 seconds")
+                return
+            }
+            lastTottiPongTime = now
 
             guard let jsonData =
                 #"{"type":"totti_pong","message":"TOTTI_PONG"}"#
@@ -506,10 +515,9 @@ final class LyricsCxrTransport: ObservableObject {
                 return
             }
 
-            let data =
-                CxrCapsCodec.encodeBinaryPayload(
-                    jsonData
-                )
+            // sendCustomCmd already wraps this payload for the glasses callback.
+            // Send JSON directly rather than nesting a serialized Caps packet.
+            let data = jsonData
 
             print(
                 "[TottiBridge] sending TOTTI_PONG bytes=\(data.count)"
