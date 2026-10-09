@@ -588,6 +588,17 @@ final class LyricsCxrTransport: ObservableObject {
                 return
             }
 
+            // CXR-L forwards the first Caps string as subCmd. The PING
+            // can therefore arrive without either payload field populated.
+            if let subCommandData = event.subCmd.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: subCommandData),
+               let fields = object as? [String: Any],
+               fields["type"] as? String == "totti_ping" {
+                print("[TottiBridge] received TOTTI_PING via subCmd")
+                sendTottiPong()
+                return
+            }
+
             guard
                 let data =
                     event.payload ??
