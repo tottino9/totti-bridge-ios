@@ -12,7 +12,7 @@ jobs:
 
     env:
       SCHEME: RokidLyricsIOS
-      PROJECT: RokidLyricsIOS.xcodeproj
+      WORKSPACE: RokidLyricsIOS.xcworkspace
       DEFAULT_BUNDLE_ID: com.anezium.rokidlyrics
 
     steps:
@@ -43,11 +43,17 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      - name: Install CocoaPods dependencies
+        run: |
+          set -euo pipefail
+          gem install cocoapods -v 1.16.2 --no-document
+          pod _1.16.2_ install --deployment
+
       - name: Build unsigned and resignable apps
         run: |
           set -euo pipefail
           xcodebuild \
-            -project "$PROJECT" \
+            -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
@@ -69,6 +75,12 @@ jobs:
           cp -R "$APP_PATH" build/resignable/Payload/
           RESIGNABLE_APP="$(find build/resignable/Payload -maxdepth 1 -name '*.app' | head -n 1)"
           test -n "$RESIGNABLE_APP"
+          if [ -d "$RESIGNABLE_APP/Frameworks" ]; then
+            find "$RESIGNABLE_APP/Frameworks" -depth \( -name '*.framework' -o -name '*.dylib' \) -print0 |
+              while IFS= read -r -d '' framework; do
+                codesign --force --sign - --timestamp=none "$framework"
+              done
+          fi
           codesign --force --sign - --timestamp=none "$RESIGNABLE_APP"
           codesign --verify --deep --strict --verbose=2 "$RESIGNABLE_APP"
           (cd build/resignable && zip -qry ../RokidLyricsIOS-resignable.ipa Payload)
@@ -177,6 +189,13 @@ jobs:
 
           cp "$PROFILE_PATH" "$SIGNED_APP/embedded.mobileprovision"
           /usr/libexec/PlistBuddy -x -c 'Print Entitlements' "$PROFILE_PLIST" > build/manual-signed/entitlements.plist
+
+          if [ -d "$SIGNED_APP/Frameworks" ]; then
+            find "$SIGNED_APP/Frameworks" -depth \( -name '*.framework' -o -name '*.dylib' \) -print0 |
+              while IFS= read -r -d '' framework; do
+                codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$framework"
+              done
+          fi
 
           codesign \
             --force \
