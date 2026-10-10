@@ -8,6 +8,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private var current: AVSpeechUtterance?
     private var report: ((String, String) -> Void)?
+    private var completed: (() -> Void)?
     private var requestID = ""
     private var startTimeout: Task<Void, Never>?
 
@@ -17,13 +18,15 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.usesApplicationAudioSession = true
     }
 
-    func speak(_ text: String, requestID: String, report: @escaping (String, String) -> Void) {
+    func speak(_ text: String, requestID: String, completed: (() -> Void)? = nil, report: @escaping (String, String) -> Void) {
         guard current == nil else {
             report("totti_audio_error", "前の回答を読み上げ中です。")
+            completed?()
             return
         }
         guard let voice = AVSpeechSynthesisVoice(language: "ja-JP") else {
             report("totti_audio_error", "iPhoneの日本語音声を利用できません。")
+            completed?()
             return
         }
         let session = AVAudioSession.sharedInstance()
@@ -34,6 +37,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
             try session.setActive(true)
         } catch {
             report("totti_audio_error", "音声出力の準備失敗: \(error.localizedDescription)")
+            completed?()
             return
         }
         let outputs = session.currentRoute.outputs
@@ -42,8 +46,10 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         report("totti_audio_status", "出力先: \(route) / 音量: \(session.outputVolume)")
         guard outputs.contains(where: { $0.portType == .bluetoothA2DP || $0.portType == .bluetoothHFP }) else {
             report("totti_audio_error", "Bluetooth音声出力が未選択です。iPhoneの再生出力先をRokidにしてください。")
+            completed?()
             return
         }
+        self.completed = completed
         self.requestID = requestID
         self.report = report
         let utterance = AVSpeechUtterance(string: text)
@@ -60,13 +66,26 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    func cancel(requestID: String) {
+        guard self.requestID == requestID, current != nil else { return }
+        startTimeout?.cancel()
+        startTimeout = nil
+        completed = nil
+        report = nil
+        current = nil
+        synthesizer.stopSpeaking(at: .immediate)
+    }
+
     private func finish(type: String, message: String) {
         startTimeout?.cancel()
         startTimeout = nil
         print("[TottiAudio] \(type) id=\(requestID) \(message)")
+        let callback = completed
+        completed = nil
         report?(type, message)
         current = nil
         report = nil
+        callback?()
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {

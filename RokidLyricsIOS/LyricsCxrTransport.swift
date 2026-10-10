@@ -32,6 +32,11 @@ final class LyricsCxrTransport: ObservableObject {
     private var tottiRequestIDs: [String] = []
     private var tottiRequestInFlight = false
     private let tottiSpeech = TottiSpeechPlayer()
+    #if !targetEnvironment(simulator)
+    private lazy var tottiVoice = TottiVoiceRelay(send: { [weak self] fields in
+        self?.sendTottiJSON(fields)
+    }, speech: tottiSpeech)
+    #endif
     private let logger = Logger(subsystem: "app.nectarine4657.lime425", category: "CXR")
 
     private struct PendingMessage {
@@ -566,6 +571,8 @@ final class LyricsCxrTransport: ObservableObject {
                   let type = fields["type"] as? String
             else { return false }
 
+            if tottiVoice.handle(fields) { return true }
+
             if type == "totti_ping" {
                 sendTottiPong()
                 return true
@@ -654,6 +661,18 @@ final class LyricsCxrTransport: ObservableObject {
                 }
             }
             return true
+        }
+
+        private func sendTottiJSON(_ fields: [String: Any]) {
+            guard let data = try? JSONSerialization.data(withJSONObject: fields) else { return }
+            let error = CxrClient.shared.sendCustomCmd(
+                cmd: TransportConstants.cxrPhoneToGlassesCommand,
+                payload: data,
+                callback: { success, _, code, _ in
+                    if !success { print("[TottiVoice] SDK callback false code=\(code ?? 0)") }
+                }
+            )
+            if let error { handleImmediateError(error, context: "voice relay send") }
         }
 
         private func sendTottiReply(type: String, requestID: String, message: String) {
