@@ -8,6 +8,7 @@ final class TottiVoiceRelay {
         let id: String
         let expectedBytes: Int
         let chunks: Int
+        let chunkBytes: Int
         let digest: String
         var next = 0
         var data = Data()
@@ -40,27 +41,28 @@ final class TottiVoiceRelay {
                 reply("totti_error", id, "前の質問に回答中です。")
                 return true
             }
-            guard !finishedIDs.contains(id),
+            let chunkBytes = fields["chunk_bytes"] as? Int ?? 2048
+            guard [128, 2048].contains(chunkBytes), !finishedIDs.contains(id),
                   let bytes = fields["bytes"] as? Int, (45...1_048_576).contains(bytes),
-                  let chunks = fields["chunks"] as? Int, chunks == (bytes + 2047) / 2048,
+                  let chunks = fields["chunks"] as? Int, chunks == (bytes + chunkBytes - 1) / chunkBytes,
                   let digest = fields["sha256"] as? String, digest.count == 64 else {
                 reply("totti_error", id, "音声転送の情報が不正です。")
                 return true
             }
-            upload = Upload(id: id, expectedBytes: bytes, chunks: chunks, digest: digest)
+            upload = Upload(id: id, expectedBytes: bytes, chunks: chunks, chunkBytes: chunkBytes, digest: digest)
             ack(id, -1)
             print("[TottiVoice] begin id=\(id) bytes=\(bytes) chunks=\(chunks)")
         case "totti_voice_chunk":
             guard var value = upload, value.id == id,
                   let seq = fields["seq"] as? Int, seq >= 0, seq < value.chunks,
                   let encoded = fields["data"] as? String, encoded.utf8.count <= 2800,
-                  let bytes = Data(base64Encoded: encoded), bytes.count <= 2048 else {
+                  let bytes = Data(base64Encoded: encoded), bytes.count <= value.chunkBytes else {
                 reply("totti_error", id, "音声転送の断片を読めませんでした。")
                 return true
             }
             if seq < value.next { ack(id, seq); return true }
             guard seq == value.next,
-                  bytes.count == min(2048, value.expectedBytes - value.data.count) else {
+                  bytes.count == min(value.chunkBytes, value.expectedBytes - value.data.count) else {
                 upload = nil
                 reply("totti_error", id, "音声転送の順序が不正です。")
                 return true
