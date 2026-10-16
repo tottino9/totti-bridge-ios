@@ -20,6 +20,7 @@ final class LyricsCxrTransport: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var protocolReady = false
     private var tottiTrafficActive = false
+        private var userEndedTotti = false
     private var subscriptionNotified = false
     private var didOpenCustomApp = false
     private var openLoopActive = false
@@ -626,7 +627,10 @@ final class LyricsCxrTransport: ObservableObject {
             else { return false }
 
             if type.hasPrefix("totti_") { activateTottiTraffic() }
-            if tottiCapture.handle(fields) { return true }
+            if tottiCapture.handle(fields) {
+                if type == "totti_mic_start" && !tottiVoice.sessionEnded { userEndedTotti = false }
+                return true
+            }
             if type.hasPrefix("totti_voice_") {
                 if let id = fields["request_id"] as? String {
                     sendTottiReply(type: "totti_error", requestID: id,
@@ -726,6 +730,10 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func sendTottiJSON(_ fields: [String: Any]) {
+            if fields["type"] as? String == "totti_session_end" {
+                userEndedTotti = true
+                openLoopActive = false
+            }
             if let type = fields["type"] as? String, !TottiDeliveryPolicy.shouldSend(type) {
                 print("[TottiLocal] \(type) id=\(fields["request_id"] ?? "") \(fields["message"] ?? "")")
                 return
@@ -826,6 +834,7 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func ensureCustomAppOpen(force: Bool = false) {
+            guard !userEndedTotti else { return }
             guard force || !didOpenCustomApp else { return }
             openAttempts += 1
             print("[RokidLyricsCXR] ensureCustomAppOpen attempt=\(openAttempts)")

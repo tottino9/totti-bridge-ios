@@ -17,6 +17,14 @@ final class TottiVoiceRelay {
     }
 
     var isBusy: Bool { activeID != nil }
+    private var session = TottiSessionPolicy()
+    var sessionEnded: Bool { session.ended }
+    func acceptSession(_ id: String) -> Bool { session.accept(id) }
+    private var lastCompletionAt: TimeInterval?
+    var millisecondsSinceCompletion: Int {
+        guard let lastCompletionAt else { return -1 }
+        return Int((ProcessInfo.processInfo.systemUptime - lastCompletionAt) * 1000)
+    }
     private var conversation = TottiConversationPolicy()
     var hasAskedToEnd: Bool { conversation.hasAskedToEnd }
 
@@ -81,6 +89,7 @@ final class TottiVoiceRelay {
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             request.httpBody = body
+            request.setValue("transcribe", forHTTPHeaderField: "X-Totti-Phase")
             print("[TottiVoice] worker POST id=\(id) bytes=\(wav.count)")
             reply("totti_capture_info", id, "WORKER_POST bytes=\(wav.count)")
             let httpStarted = ProcessInfo.processInfo.systemUptime
@@ -94,7 +103,39 @@ final class TottiVoiceRelay {
             guard let text = String(data: data, encoding: .utf8) else {
                 throw RelayError.message("AIの回答を読めませんでした。")
             }
-            let result = try Self.parseResponse(text)
+            let result: Result
+            var alreadyDisplayedUser = false
+            if http.value(forHTTPHeaderField: "Content-Type")?.contains("application/json") == true {
+                guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let user = fields["text"] as? String, !user.isEmpty else {
+                    throw RelayError.message("音声認識の結果を取得できませんでした。")
+                }
+                print("[TottiTiming] transcript id=\(id) ms=\(Int((ProcessInfo.processInfo.systemUptime-httpStarted)*1000))")
+                if Self.isExitPhrase(user) {
+                    finish(id, endingSession: true)
+                    return
+                }
+                conversation.recognizedSpeech()
+                send(["type": "totti_thinking", "request_id": id, "message": "考えています…", "text": user])
+                alreadyDisplayedUser = true
+                var chat = URLRequest(url: request.url!)
+                chat.httpMethod = "POST"
+                chat.timeoutInterval = 60
+                chat.allowsCellularAccess = true
+                chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                chat.httpBody = try JSONSerialization.data(withJSONObject: ["text": user])
+                let (answerData, answerResponse) = try await URLSession.shared.data(for: chat)
+                try Task.checkCancellation()
+                guard activeID == id else { return }
+                guard let answerHTTP = answerResponse as? HTTPURLResponse, (200...299).contains(answerHTTP.statusCode),
+                      let answerBody = String(data: answerData, encoding: .utf8) else {
+                    throw RelayError.message("AI回答の取得に失敗しました。")
+                }
+                result = try Self.parseResponse(answerBody)
+            } else {
+                // Compatibility with the old Worker during a staged update.
+                result = try Self.parseResponse(text)
+            }
             if TottiConversationPolicy.isNoSpeechResponse(user: result.user, answer: result.answer) {
                 // Legacy Worker represents empty transcription as an answer event.
                 // Never speak that answer repeatedly as though it were a conversation.
@@ -103,11 +144,9 @@ final class TottiVoiceRelay {
                 return
             }
             if !result.user.isEmpty { conversation.recognizedSpeech() }
-            reply("totti_user", id, result.user)
+            if !alreadyDisplayedUser { reply("totti_user", id, result.user) }
             if Self.isExitPhrase(result.user) {
-                TottiConversationAudio.end()
-                reply("totti_session_end", id, "会話を終了します。")
-                finish(id)
+                finish(id, endingSession: true)
                 return
             }
             send(["type": "totti_answer", "request_id": id, "message": result.answer,
@@ -170,15 +209,20 @@ final class TottiVoiceRelay {
     private func reply(_ type: String, _ id: String, _ message: String) {
         send(["type": type, "request_id": id, "message": message])
     }
-    private func finish(_ id: String) {
+    private func finish(_ id: String, endingSession: Bool = false) {
         guard activeID == id else { return }
+        if endingSession { session.end() }
         speechTimeout?.cancel()
         speechTimeout = nil
         activeID = nil
         task = nil
         finishedIDs.append(id)
         if finishedIDs.count > 32 { finishedIDs.removeFirst() }
-        send(["type": "totti_turn_done", "request_id": id])
+        lastCompletionAt = ProcessInfo.processInfo.systemUptime
+        let eventType = endingSession ? "totti_session_end" : "totti_turn_done"
+        print("[TottiTiming] completion id=\(id) type=\(eventType) uptime=\(ProcessInfo.processInfo.systemUptime)")
+        send(["type": eventType, "request_id": id])
+        if endingSession { TottiConversationAudio.end() }
         // Retain retries for a lost completion, but stop when the next capture arrives.
         completionRetries.invalidate()
         let retryToken = completionRetries.revision
@@ -186,7 +230,7 @@ final class TottiVoiceRelay {
             for _ in 0..<2 {
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
                 guard let self, self.completionRetries.isCurrent(retryToken) else { return }
-                self.send(["type": "totti_turn_done", "request_id": id])
+                self.send(["type": eventType, "request_id": id])
             }
         }
     }

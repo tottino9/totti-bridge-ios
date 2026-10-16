@@ -9,12 +9,22 @@ struct TottiDeliveryChecks {
         precondition(!TottiDeliveryPolicy.shouldSend("totti_capture_info"))
         precondition(!TottiDeliveryPolicy.shouldSend("totti_audio_status"))
         precondition(TottiDeliveryPolicy.silenceSeconds == 2)
-        for text in ["バイバイ", "ばいばい。", " バイバイ！ ", "会話を終了して"] {
+        for text in ["バイバイ", "ばいばい。", " バイバイ！ ", "会話を終了して", "Bye-bye", "bye bye", "BYE-BYE!", "바이바이", "拜拜", "再见", "じゃあ、バイバイ", "ﾊﾞｲﾊﾞｲ"] {
             precondition(TottiDeliveryPolicy.isExitPhrase(text))
         }
         for text in ["バイバイって何？", "この作業は終わり？", "終了時刻を教えて", "まだ終了しない", ""] {
             precondition(!TottiDeliveryPolicy.isExitPhrase(text))
         }
+        var session = TottiSessionPolicy()
+        precondition(session.accept("one"))
+        session.end()
+        precondition(session.ended)
+        precondition(!session.accept("one"))
+        precondition(session.accept("two"))
+        precondition(!session.accept("one"))
+        precondition(!session.ended)
+        session.end()
+        precondition(!session.accept("two"))
         var conversation = TottiConversationPolicy()
         precondition(conversation.takeSilencePrompt() != nil)
         for _ in 0..<100 { precondition(conversation.takeSilencePrompt() == nil) }

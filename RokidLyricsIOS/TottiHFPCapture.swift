@@ -31,6 +31,10 @@ final class TottiHFPCapture {
             if activeID == id { if recorder?.isRecording == true { acknowledge(id) }; return true }
             if recentIDs.contains(id) { return true }
             guard activeID == nil, !relay.isBusy else { reply("totti_error", id, "前の音声を処理中です。"); return true }
+            guard relay.acceptSession(fields["session_id"] as? String ?? "legacy") else {
+                send(["type": "totti_session_end", "request_id": id])
+                return true
+            }
             relay.noteCaptureRequest()
             activeID = id; lastAckAt = -Double.infinity
             startupStage = "permission"
@@ -129,7 +133,6 @@ final class TottiHFPCapture {
         }
         startupStage = "recording"
         guard validRoute() else { throw Failure.message("録音開始時に入力が眼鏡以外へ変わりました。") }
-        acknowledge(id)
         reply("totti_capture_info", id, "HFP_INPUT \(selected.name) WAV=16000Hz/mono/PCM16")
         print("[TottiHFP] RECORD id=\(id) input=\(selected.name) uid=\(selected.uid)")
         startup = nil
@@ -149,7 +152,7 @@ final class TottiHFPCapture {
                 let now = ProcessInfo.processInfo.systemUptime
                 if !announced && recording.currentTime >= 0.15 {
                     announced = true
-                    self.reply("totti_listening", id, "聞いています（眼鏡のBluetoothマイク）")
+                    self.acknowledge(id)
                 }
                 if recording.currentTime >= 0.15 && level >= -40 { heardSpeech = true; lastSpeech = now }
                 if heardSpeech && now - lastSpeech >= TottiDeliveryPolicy.silenceSeconds { self.finish(); return }
@@ -191,9 +194,10 @@ final class TottiHFPCapture {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastAckAt >= 10 else { return }
         lastAckAt = now
-        send(["type": "totti_mic_ack", "request_id": id, "message": "start",
+        send(["type": "totti_listening", "request_id": id, "message": "話しかけてください",
               "input_name": audio.currentRoute.inputs.map { $0.portName }.joined(separator: ","),
-              "silence_seconds": TottiDeliveryPolicy.silenceSeconds])
+              "silence_seconds": TottiDeliveryPolicy.silenceSeconds,
+              "resume_ms": relay.millisecondsSinceCompletion])
     }
     private func finish() {
         guard let id = activeID, let recording = recorder, let url = fileURL else { return }
@@ -203,7 +207,6 @@ final class TottiHFPCapture {
             let wav = try Data(contentsOf: url)
             let bytes = try TottiHFPWave.validate(wav)
             cleanup(keepAudio: true)
-            reply("totti_processing", id, "iPhoneからAIへ送信中…")
             reply("totti_capture_info", id, "HFP_WAV_READY pcmBytes=\(bytes) wavBytes=\(wav.count)")
             relay.submitCaptured(id, wav: wav)
         } catch { fail("HFP録音ファイルの形式・長さを確認できませんでした: \(error)") }
@@ -228,6 +231,7 @@ final class TottiHFPCapture {
     }
     private func fail(_ message: String) {
         guard let id = activeID else { return }
+        if relay.sessionEnded { cleanup(); return }
         print("[TottiHFP] ERROR id=\(id) \(message)")
         cleanup(); reply("totti_error", id, message)
     }

@@ -3,8 +3,14 @@ import Foundation
 /// Keep control, user text, answers and errors. Routine diagnostics stay on iPhone.
 enum TottiDeliveryPolicy {
     static func isExitPhrase(_ text: String) -> Bool {
-        let normalized = text.components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).joined()
-        return ["バイバイ", "ばいばい", "さようなら", "終了", "終わり", "会話を終了", "会話を終了して"].contains(normalized)
+        let folded = text.folding(options: [.widthInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        var normalized = folded.components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).joined()
+        for prefix in ["それじゃあ", "それじゃ", "じゃあ", "では", "じゃ"] {
+            if normalized.hasPrefix(prefix) { normalized.removeFirst(prefix.count); break }
+        }
+        return ["バイバイ", "ばいばい", "バイバイね", "ばいばいね", "バイバーイ", "ばいばーい",
+                "byebye", "bye", "바이바이", "바이바이요", "拜拜", "掰掰", "再见", "再見",
+                "さようなら", "さよなら", "終了", "終わり", "会話を終了", "会話を終了して"].contains(normalized)
     }
     static let silenceSeconds: TimeInterval = 2
     static func shouldSend(_ type: String) -> Bool {
@@ -32,5 +38,25 @@ struct TottiConversationPolicy {
         let trim = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
         return user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             answer.trimmingCharacters(in: trim) == "音声を認識できませんでした"
+    }
+}
+
+/// A closed conversation cannot be revived by delayed capture commands.
+struct TottiSessionPolicy {
+    private var current: String?
+    private var closed: Set<String> = []
+    private(set) var ended = false
+    mutating func accept(_ id: String) -> Bool {
+        guard !id.isEmpty, !closed.contains(id) else { return false }
+        if current != id {
+            if let current { closed.insert(current) }
+            current = id
+        }
+        ended = false
+        return true
+    }
+    mutating func end() {
+        if let current { closed.insert(current) }
+        ended = true
     }
 }
