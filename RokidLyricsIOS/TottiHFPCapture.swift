@@ -32,7 +32,7 @@ final class TottiHFPCapture {
         guard let id = fields["request_id"] as? String, !id.isEmpty, id.utf8.count <= 128 else { return true }
         switch type {
         case "totti_mic_start":
-            if activeID == id { acknowledgeStart(id); return true }
+            if activeID == id { return true }
             guard activeID == nil else { return true }
             guard relay.acceptSession(fields["session_id"] as? String ?? "legacy") else {
                 send(["type": "totti_session_end", "request_id": id]); return true
@@ -40,7 +40,6 @@ final class TottiHFPCapture {
             activeID = id; generation = UUID(); ready = false; segmenter = TottiDuplexSegmenter()
             startedAt = ProcessInfo.processInfo.systemUptime; lastFrameAt = startedAt; quietSince = startedAt
             startReplies = TottiStartReplyPolicy()
-            acknowledgeStart(id)
             lastHeartbeatAt = startedAt
             relay.beginContinuous(id)
             startup = Task { @MainActor [weak self] in
@@ -152,7 +151,12 @@ final class TottiHFPCapture {
                 guard now - self.lastFrameAt < 10 else {
                     self.fail("眼鏡の音声入力が10秒間届かないため停止しました。"); return
                 }
-                if now - self.lastHeartbeatAt >= 15 {
+                // Speech/HTTP work can produce a HUD packet shortly. Do not
+                // put a routine heartbeat ahead of it. A heartbeat still goes
+                // out by 20 s to keep the existing 30 s watchdog alive.
+                let lastTraffic = max(self.lastHeartbeatAt, self.relay.lastHUDSendAt)
+                let userWork = self.segmenter.speaking || self.relay.isBusy
+                if now - lastTraffic >= 20 || (now - lastTraffic >= 15 && !userWork) {
                     self.lastHeartbeatAt = now
                     self.send(["type": "totti_heartbeat", "request_id": id])
                 }
@@ -177,10 +181,6 @@ final class TottiHFPCapture {
             case .ended(let wav): quietSince = ProcessInfo.processInfo.systemUptime; relay.submitContinuous(wav)
             }
         }
-    }
-    private func acknowledgeStart(_ id: String) {
-        guard startReplies.shouldAcknowledge(at: ProcessInfo.processInfo.systemUptime) else { return }
-        send(["type": "totti_mic_ack", "request_id": id, "message": "start"])
     }
     private func announceReady() {
         guard let activeID, ready, startReplies.shouldAnnounceReady() else { return }

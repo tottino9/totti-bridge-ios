@@ -10,6 +10,7 @@ final class TottiVoiceRelay {
     private var session = TottiSessionPolicy()
     private var conversation = TottiConversationPolicy()
     private var controlID: String?
+    private(set) var lastHUDSendAt = ProcessInfo.processInfo.systemUptime
     private var tasks: [String: Task<Void, Never>] = [:]
     private var turns = TottiDuplexTurns()
     private var spokenID: String?
@@ -31,6 +32,7 @@ final class TottiVoiceRelay {
     }
     func acceptSession(_ id: String) -> Bool { session.accept(id) }
     func beginContinuous(_ id: String) {
+        lastHUDSendAt = ProcessInfo.processInfo.systemUptime
         controlID = id; turns = TottiDuplexTurns(); conversation = TottiConversationPolicy()
         userSpeaking = false; captureTurn = nil; awaitingTranscript.removeAll()
     }
@@ -93,6 +95,7 @@ final class TottiVoiceRelay {
         var event: [String: Any] = ["type": type, "request_id": controlID, "message": message]
         if let turn { event["turn_id"] = turn }
         if let text { event["text"] = text }
+        lastHUDSendAt = ProcessInfo.processInfo.systemUptime
         send(event)
     }
     private func drainSpeech() {
