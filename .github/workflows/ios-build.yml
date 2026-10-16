@@ -58,6 +58,15 @@ jobs:
             -o build/totti-audio-gate-checks
           build/totti-audio-gate-checks
 
+      - name: Check low-traffic Totti delivery policy
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiDeliveryPolicy.swift \
+            scripts/TottiDeliveryChecks.swift \
+            -o build/totti-delivery-checks
+          build/totti-delivery-checks
+
       - name: Install tools
         run: brew install xcodegen
 

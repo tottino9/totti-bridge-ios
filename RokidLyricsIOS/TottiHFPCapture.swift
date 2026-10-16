@@ -16,7 +16,6 @@ final class TottiHFPCapture {
     private let send: ([String: Any]) -> Void
     private let relay: TottiVoiceRelay
     private let audio = AVAudioSession.sharedInstance()
-    private var activated = false
     private var audioOwner: String?
     private var startupStage = "idle"
 
@@ -32,9 +31,12 @@ final class TottiHFPCapture {
             if activeID == id { if recorder?.isRecording == true { acknowledge(id) }; return true }
             if recentIDs.contains(id) { return true }
             guard activeID == nil, !relay.isBusy else { reply("totti_error", id, "前の音声を処理中です。"); return true }
+            relay.noteCaptureRequest()
             activeID = id; lastAckAt = -Double.infinity
             startupStage = "permission"
-            reply("totti_status", id, "iPhoneのマイク許可と音声接続を確認中…")
+            if audio.recordPermission == .undetermined {
+                reply("totti_status", id, "iPhoneの画面でマイクの利用を許可してください。")
+            }
             startup = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do { try await self.start(id) }
@@ -81,10 +83,13 @@ final class TottiHFPCapture {
             throw Failure.message("前の音声処理の終了を待ってから開始してください。")
         }
         audioOwner = owner
-        startupStage = "category"
-        try audio.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-        startupStage = "activate"
-        try audio.setActive(true); activated = true
+        if !TottiAudioGate.conversationActive {
+            startupStage = "category"
+            try audio.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+            startupStage = "activate"
+            try audio.setActive(true)
+            TottiAudioGate.retainConversation()
+        }
         startupStage = "selectHFP"
         // iOS can publish availableInputs after session activation.
         var ports = audio.availableInputs ?? []
@@ -97,7 +102,7 @@ final class TottiHFPCapture {
         guard let port = ports.first(where: { $0.uid == selected.uid }) else { throw Failure.message("HFP入力が接続解除されました。") }
         selectedUID = selected.uid
         startupStage = "route"
-        try audio.setPreferredInput(port)
+        if !validRoute() { try audio.setPreferredInput(port) }
         for _ in 0..<30 {
             if validRoute() { break }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -132,7 +137,7 @@ final class TottiHFPCapture {
             var heardSpeech = false, announced = false
             var lastSpeech: TimeInterval = 0
             var peakDB: Float = -160
-            let began = ProcessInfo.processInfo.systemUptime
+            var began = ProcessInfo.processInfo.systemUptime
             while !Task.isCancelled {
                 do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
                 guard let self, self.activeID == id, let recording = self.recorder else { return }
@@ -147,10 +152,25 @@ final class TottiHFPCapture {
                     self.reply("totti_listening", id, "聞いています（眼鏡のBluetoothマイク）")
                 }
                 if recording.currentTime >= 0.15 && level >= -40 { heardSpeech = true; lastSpeech = now }
-                if heardSpeech && now - lastSpeech >= 3 { self.finish(); return }
+                if heardSpeech && now - lastSpeech >= TottiDeliveryPolicy.silenceSeconds { self.finish(); return }
                 if now - began >= 30 {
                     if heardSpeech { self.finish() }
-                    else { self.fail("眼鏡のHFP入力で30秒間声を検出できませんでした（最大\(Int(peakDB))dB）。") }
+                    else if !self.relay.hasAskedToEnd {
+                        self.cleanup(keepAudio: true)
+                        self.relay.promptAfterSilence(id)
+                    } else {
+                        // Stay listening silently after the single end-of-conversation prompt.
+                        // Route and recorder health checks above remain active.
+                        // Roll the silent recording file to bound disk use. No network
+                        // request, HUD message, or audio-session activation is repeated.
+                        recording.stop()
+                        guard recording.prepareToRecord(), recording.record() else {
+                            self.fail("待機中の録音を再開できませんでした。")
+                            return
+                        }
+                        began = now
+                        continue
+                    }
                     return
                 }
             }
@@ -170,7 +190,10 @@ final class TottiHFPCapture {
     private func acknowledge(_ id: String) {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastAckAt >= 10 else { return }
-        lastAckAt = now; reply("totti_mic_ack", id, "start")
+        lastAckAt = now
+        send(["type": "totti_mic_ack", "request_id": id, "message": "start",
+              "input_name": audio.currentRoute.inputs.map { $0.portName }.joined(separator: ","),
+              "silence_seconds": TottiDeliveryPolicy.silenceSeconds])
     }
     private func finish() {
         guard let id = activeID, let recording = recorder, let url = fileURL else { return }
@@ -179,7 +202,7 @@ final class TottiHFPCapture {
         do {
             let wav = try Data(contentsOf: url)
             let bytes = try TottiHFPWave.validate(wav)
-            cleanup()
+            cleanup(keepAudio: true)
             reply("totti_processing", id, "iPhoneからAIへ送信中…")
             reply("totti_capture_info", id, "HFP_WAV_READY pcmBytes=\(bytes) wavBytes=\(wav.count)")
             relay.submitCaptured(id, wav: wav)
@@ -208,17 +231,13 @@ final class TottiHFPCapture {
         print("[TottiHFP] ERROR id=\(id) \(message)")
         cleanup(); reply("totti_error", id, message)
     }
-    private func cleanup() {
+    private func cleanup(keepAudio: Bool = false) {
         startup?.cancel(); startup = nil; monitor?.cancel(); monitor = nil
         recorder?.stop(); recorder = nil
         if let url = fileURL { try? FileManager.default.removeItem(at: url) }; fileURL = nil
         if let id = activeID { recentIDs.append(id); if recentIDs.count > 32 { recentIDs.removeFirst() } }
         activeID = nil; selectedUID = nil
-        if activated {
-            do { try audio.setActive(false, options: .notifyOthersOnDeactivation) }
-            catch { print("[TottiHFP] DEACTIVATE_FAILED \(error)") }
-            activated = false
-        }
+        if !keepAudio { TottiConversationAudio.end() }
         if let owner = audioOwner { TottiAudioGate.release(owner) }
         audioOwner = nil
         startupStage = "idle"

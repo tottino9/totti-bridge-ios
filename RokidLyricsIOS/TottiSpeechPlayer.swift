@@ -41,8 +41,12 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         do {
             // Matches the existing background keep-alive session. Do not deactivate
             // this shared session when speech finishes.
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
+            if !TottiAudioGate.conversationActive {
+                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                try session.setActive(true)
+            }
+            // During a conversation keep the already selected HFP input/output.
+            // The recorder is stopped before synthesis, avoiding self-transcription.
         } catch {
             releaseAudioOwnership()
             report("totti_audio_error", "音声出力の準備失敗: \(error.localizedDescription)")

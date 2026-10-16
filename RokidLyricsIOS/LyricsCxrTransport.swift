@@ -19,6 +19,7 @@ final class LyricsCxrTransport: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var protocolReady = false
+    private var tottiTrafficActive = false
     private var subscriptionNotified = false
     private var didOpenCustomApp = false
     private var openLoopActive = false
@@ -122,6 +123,7 @@ final class LyricsCxrTransport: ObservableObject {
         #if targetEnvironment(simulator)
             return
         #else
+            guard !tottiTrafficActive else { return }
             guard protocolReady, didOpenCustomApp else {
                 print("[RokidLyricsCXR] queued channelReady=false protocolReady=\(protocolReady) appOpen=\(didOpenCustomApp) \(safeSummary(message))")
                 enqueue(PendingMessage(message: message, priority: priority, attempts: 0))
@@ -137,6 +139,7 @@ final class LyricsCxrTransport: ObservableObject {
 
     #if !targetEnvironment(simulator)
         private func sendNow(_ pending: PendingMessage) {
+            guard !tottiTrafficActive else { return }
             // The glasses app reads the custom-command payload as a Rokid Caps binary member, so
             // wrap the JSON in a proper Caps v5 blob. The SDK base64-transports the raw payload
             // bytes as-is; the glasses do Caps.fromBytes(payload).
@@ -549,7 +552,15 @@ final class LyricsCxrTransport: ObservableObject {
             }
         }
 
+        private func activateTottiTraffic() {
+            guard !tottiTrafficActive else { return }
+            tottiTrafficActive = true
+            pendingMessages.removeAll()
+            print("[TottiTransport] TOTTI_ONLY: legacy lyrics traffic suspended")
+        }
+
         private func sendTottiPong() {
+            activateTottiTraffic()
             // Both the legacy client and the session can deliver the same probe.
             // Suppress repeats during one probe burst; a later probe can reply again.
             let now = ProcessInfo.processInfo.systemUptime
@@ -614,6 +625,7 @@ final class LyricsCxrTransport: ObservableObject {
                   let type = fields["type"] as? String
             else { return false }
 
+            if type.hasPrefix("totti_") { activateTottiTraffic() }
             if tottiCapture.handle(fields) { return true }
             if type.hasPrefix("totti_voice_") {
                 if let id = fields["request_id"] as? String {
@@ -714,6 +726,10 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func sendTottiJSON(_ fields: [String: Any]) {
+            if let type = fields["type"] as? String, !TottiDeliveryPolicy.shouldSend(type) {
+                print("[TottiLocal] \(type) id=\(fields["request_id"] ?? "") \(fields["message"] ?? "")")
+                return
+            }
             guard let data = try? JSONSerialization.data(withJSONObject: fields) else { return }
             let error = CxrClient.shared.sendCustomCmd(
                 cmd: TransportConstants.cxrPhoneToGlassesCommand,
