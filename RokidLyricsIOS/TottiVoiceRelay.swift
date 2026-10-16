@@ -1,180 +1,172 @@
 import Foundation
 
-/// Uploads PCM captured through official CXR audio APIs using the iPhone network.
+/// One control session, independently identified HTTP turns. New speech never
+/// cancels an older answer. Only explicit session termination cancels requests.
 @MainActor
 final class TottiVoiceRelay {
-    private var activeID: String?
-    private var task: Task<Void, Never>?
-    private var speechTimeout: Task<Void, Never>?
-    private var finishedIDs: [String] = []
-    private var completionRetries = TottiCompletionRetryPolicy()
     private let send: ([String: Any]) -> Void
     private let speech: TottiSpeechPlayer
-
-    init(send: @escaping ([String: Any]) -> Void, speech: TottiSpeechPlayer) {
-        self.send = send
-        self.speech = speech
-    }
-
-    var isBusy: Bool { activeID != nil }
+    private let performRequest: (URLRequest) async throws -> (Data, URLResponse)
     private var session = TottiSessionPolicy()
-    var sessionEnded: Bool { session.ended }
-    func acceptSession(_ id: String) -> Bool { session.accept(id) }
-    private var lastCompletionAt: TimeInterval?
-    var millisecondsSinceCompletion: Int {
-        guard let lastCompletionAt else { return -1 }
-        return Int((ProcessInfo.processInfo.systemUptime - lastCompletionAt) * 1000)
-    }
     private var conversation = TottiConversationPolicy()
+    private var controlID: String?
+    private var tasks: [String: Task<Void, Never>] = [:]
+    private var turns = TottiDuplexTurns()
+    private var spokenID: String?
+    private var speechTimeout: Task<Void, Never>?
+    private var speechQueue: [(String, String)] = []
+    private var userSpeaking = false
+    private var captureTurn: String?
+    private var awaitingTranscript = Set<String>()
+    var onSessionClosed: (() -> Void)?
+    var isBusy: Bool { !tasks.isEmpty || spokenID != nil }
+    var sessionEnded: Bool { session.ended }
     var hasAskedToEnd: Bool { conversation.hasAskedToEnd }
-
-    func promptAfterSilence(_ id: String) {
-        guard !isBusy else { return }
-        activeID = id
-        guard let message = conversation.takeSilencePrompt() else { finish(id); return }
-        reply("totti_answer", id, message)
-        speechTimeout = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
-            guard let self, self.activeID == id else { return }
-            self.speech.cancel(requestID: id)
-            self.finish(id)
-        }
-        speech.speak(message, requestID: id, completed: { [weak self] in
-            self?.finish(id)
-        }) { [weak self] type, message in self?.reply(type, id, message) }
+    var millisecondsSinceCompletion: Int { 0 }
+    init(send: @escaping ([String: Any]) -> Void, speech: TottiSpeechPlayer,
+         performRequest: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+             try await URLSession.shared.data(for: $0)
+         }) {
+        self.send = send; self.speech = speech; self.performRequest = performRequest
     }
-
-    func noteCaptureRequest() { completionRetries.invalidate() }
-
+    func acceptSession(_ id: String) -> Bool { session.accept(id) }
+    func beginContinuous(_ id: String) {
+        controlID = id; turns = TottiDuplexTurns(); conversation = TottiConversationPolicy()
+        userSpeaking = false; captureTurn = nil; awaitingTranscript.removeAll()
+    }
+    func noteCaptureRequest() { }
+    func speechBegan() {
+        guard controlID != nil, !sessionEnded else { return }
+        userSpeaking = true
+        let id = UUID().uuidString; captureTurn = id
+        if let playing = spokenID {
+            speech.cancel(requestID: playing)
+            speechTimeout?.cancel(); speechTimeout = nil; spokenID = nil
+        }
+        emit("totti_speech_started", turn: id, message: "聞き取っています…")
+    }
+    func submitContinuous(_ wav: Data) {
+        guard let id = captureTurn, controlID != nil, !sessionEnded else { return }
+        captureTurn = nil; userSpeaking = false
+        awaitingTranscript.insert(id)
+        submitCaptured(id, wav: wav)
+        emit("totti_listening", message: "話しかけてください")
+    }
     func submitCaptured(_ id: String, wav: Data) {
-        guard !isBusy, !finishedIDs.contains(id), wav.count > 44 else {
-            reply("totti_error", id, "音声処理を開始できませんでした。")
-            return
-        }
-        activeID = id
-        // TottiHFPCapture already sent the processing status for this turn.
-        task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.askWorker(id, wav: wav)
-        }
+        guard wav.count > 44, turns.insert(id) else { return }
+        tasks[id] = Task { @MainActor [weak self] in await self?.askWorker(id, wav: wav) }
     }
-
+    func promptAfterSilence(_ id: String) {
+        guard !isBusy, !userSpeaking, let message = conversation.takeSilencePrompt() else { return }
+        let promptID = UUID().uuidString
+        emit("totti_answer", turn: promptID, message: message)
+        speechQueue.append((promptID, message)); drainSpeech()
+    }
     func cancelCaptured(_ id: String) {
-        guard activeID == id else { return }
-        task?.cancel()
-        speechTimeout?.cancel()
-        speech.cancel(requestID: id)
-        finish(id)
-        TottiConversationAudio.end()
+        // A control cancellation ends this conversation, not one ordinary answer.
+        guard id == controlID || turns.contains(id) else { return }
+        close(emitTerminal: false)
     }
-
-    func connectionLost() {
-        if let id = activeID {
-            reply("totti_error", id, "眼鏡との接続が切れたため音声処理を停止しました。")
-            cancelCaptured(id)
+    func connectionLost() { close(emitTerminal: false) }
+    private func close(emitTerminal: Bool) {
+        guard let control = controlID else { return }
+        session.end(); controlID = nil; turns.close()
+        for task in tasks.values { task.cancel() }; tasks.removeAll()
+        if let id = spokenID { speech.cancel(requestID: id) }
+        speechTimeout?.cancel(); speechTimeout = nil; spokenID = nil
+        speechQueue.removeAll(); awaitingTranscript.removeAll(); userSpeaking = false; captureTurn = nil
+        onSessionClosed?()
+        TottiConversationAudio.end()
+        if emitTerminal {
+            send(["type": "totti_session_end", "request_id": control])
+            Task { @MainActor [weak self] in
+                for _ in 0..<2 {
+                    do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                    guard let self, self.controlID == nil else { return }
+                    self.send(["type": "totti_session_end", "request_id": control])
+                }
+            }
         }
-        TottiConversationAudio.end()
     }
-
+    private func emit(_ type: String, turn: String? = nil, message: String = "", text: String? = nil) {
+        guard let controlID else { return }
+        var event: [String: Any] = ["type": type, "request_id": controlID, "message": message]
+        if let turn { event["turn_id"] = turn }
+        if let text { event["text"] = text }
+        send(event)
+    }
+    private func drainSpeech() {
+        guard controlID != nil, !userSpeaking, awaitingTranscript.isEmpty,
+              spokenID == nil, !speechQueue.isEmpty else { return }
+        let (id, answer) = speechQueue.removeFirst(); spokenID = id
+        speechTimeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 90_000_000_000) } catch { return }
+            guard let self, self.spokenID == id else { return }
+            self.speech.cancel(requestID: id); self.speechFinished(id)
+        }
+        speech.speak(answer, requestID: id, completed: { [weak self] in self?.speechFinished(id) }) {
+            [weak self] type, message in self?.emit(type, turn: id, message: message)
+        }
+    }
+    private func speechFinished(_ id: String) {
+        guard spokenID == id else { return }
+        speechTimeout?.cancel(); speechTimeout = nil; spokenID = nil
+        drainSpeech()
+    }
     private func askWorker(_ id: String, wav: Data) async {
+        defer {
+            tasks[id] = nil; awaitingTranscript.remove(id)
+            _ = turns.complete(id); drainSpeech()
+        }
         do {
             let boundary = "Totti-" + UUID().uuidString
             var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8)
-            body.append(wav)
-            body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+            body.append(wav); body.append(Data("\r\n--\(boundary)--\r\n".utf8))
             var request = URLRequest(url: URL(string: "https://totti-ai.toshiakino-9.workers.dev/glasses/chat")!)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 60
-            request.allowsCellularAccess = true
+            request.httpMethod = "POST"; request.timeoutInterval = 60; request.allowsCellularAccess = true
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-            request.httpBody = body
-            request.setValue("transcribe", forHTTPHeaderField: "X-Totti-Phase")
-            print("[TottiVoice] worker POST id=\(id) bytes=\(wav.count)")
-            reply("totti_capture_info", id, "WORKER_POST bytes=\(wav.count)")
-            let httpStarted = ProcessInfo.processInfo.systemUptime
-            let metrics = TottiNetworkMetrics()
-            let (data, response) = try await URLSession.shared.data(for: request, delegate: metrics)
+            request.setValue("transcribe", forHTTPHeaderField: "X-Totti-Phase"); request.httpBody = body
+            let (data, response) = try await performRequest(request)
             try Task.checkCancellation()
-            guard activeID == id else { return }
+            guard turns.contains(id) else { return }
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                throw RelayError.message("AIサーバー HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                throw RelayError.message("音声認識サーバー HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
             }
-            guard let text = String(data: data, encoding: .utf8) else {
-                throw RelayError.message("AIの回答を読めませんでした。")
+            // Require the already deployed transcript-first Worker. Silently
+            // treating an old SSE response as a transcript would break receipt feedback.
+            guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let user = fields["text"] as? String else {
+                throw RelayError.message("Workerの音声認識先行応答を確認できませんでした。")
             }
-            let result: Result
-            var alreadyDisplayedUser = false
-            if http.value(forHTTPHeaderField: "Content-Type")?.contains("application/json") == true {
-                guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let user = fields["text"] as? String, !user.isEmpty else {
-                    throw RelayError.message("音声認識の結果を取得できませんでした。")
-                }
-                print("[TottiTiming] transcript id=\(id) ms=\(Int((ProcessInfo.processInfo.systemUptime-httpStarted)*1000))")
-                if Self.isExitPhrase(user) {
-                    finish(id, endingSession: true)
-                    return
-                }
-                conversation.recognizedSpeech()
-                send(["type": "totti_thinking", "request_id": id, "message": "考えています…", "text": user])
-                alreadyDisplayedUser = true
-                var chat = URLRequest(url: request.url!)
-                chat.httpMethod = "POST"
-                chat.timeoutInterval = 60
-                chat.allowsCellularAccess = true
-                chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                chat.httpBody = try JSONSerialization.data(withJSONObject: ["text": user])
-                let (answerData, answerResponse) = try await URLSession.shared.data(for: chat)
-                try Task.checkCancellation()
-                guard activeID == id else { return }
-                guard let answerHTTP = answerResponse as? HTTPURLResponse, (200...299).contains(answerHTTP.statusCode),
-                      let answerBody = String(data: answerData, encoding: .utf8) else {
-                    throw RelayError.message("AI回答の取得に失敗しました。")
-                }
-                result = try Self.parseResponse(answerBody)
-            } else {
-                // Compatibility with the old Worker during a staged update.
-                result = try Self.parseResponse(text)
-            }
-            if TottiConversationPolicy.isNoSpeechResponse(user: result.user, answer: result.answer) {
-                // Legacy Worker represents empty transcription as an answer event.
-                // Never speak that answer repeatedly as though it were a conversation.
-                activeID = nil
-                promptAfterSilence(id)
+            if user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                emit("totti_turn_error", turn: id, message: "聞き取れませんでした。もう一度話してください。")
                 return
             }
-            if !result.user.isEmpty { conversation.recognizedSpeech() }
-            if !alreadyDisplayedUser { reply("totti_user", id, result.user) }
-            if Self.isExitPhrase(result.user) {
-                finish(id, endingSession: true)
-                return
+            if TottiDeliveryPolicy.isExitPhrase(user) { close(emitTerminal: true); return }
+            conversation.recognizedSpeech()
+            emit("totti_thinking", turn: id, message: "考えています…", text: user)
+            awaitingTranscript.remove(id)
+            drainSpeech()
+            var chat = URLRequest(url: request.url!)
+            chat.httpMethod = "POST"; chat.timeoutInterval = 60; chat.allowsCellularAccess = true
+            chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            chat.httpBody = try JSONSerialization.data(withJSONObject: ["text": user])
+            let (answerData, answerResponse) = try await performRequest(chat)
+            try Task.checkCancellation()
+            guard turns.contains(id) else { return }
+            guard let answerHTTP = answerResponse as? HTTPURLResponse, (200...299).contains(answerHTTP.statusCode),
+                  let answerBody = String(data: answerData, encoding: .utf8) else {
+                throw RelayError.message("AI回答の取得に失敗しました。")
             }
-            send(["type": "totti_answer", "request_id": id, "message": result.answer,
-                  "network_transport": metrics.transport,
-                  "http_ms": Int((ProcessInfo.processInfo.systemUptime - httpStarted) * 1000),
-                  "wav_bytes": wav.count])
-            speechTimeout = Task { @MainActor [weak self] in
-                do { try await Task.sleep(nanoseconds: 90_000_000_000) } catch { return }
-                guard let self, self.activeID == id else { return }
-                self.reply("totti_audio_error", id, "読み上げの完了を確認できませんでした。")
-                self.speech.cancel(requestID: id)
-                self.finish(id)
-            }
-            speech.speak(result.answer, requestID: id, completed: { [weak self] in
-                self?.finish(id)
-            }) { [weak self] type, message in
-                self?.reply(type, id, message)
-            }
-        } catch is CancellationError {
-            if activeID == id { finish(id) }
-        } catch {
-            guard activeID == id else { return }
-            print("[TottiVoice] worker error id=\(id) \(error.localizedDescription)")
-            reply("totti_error", id, error.localizedDescription)
-            finish(id)
+            let result = try Self.parseResponse(answerBody)
+            emit("totti_answer", turn: id, message: result.answer)
+            speechQueue.append((id, result.answer)); drainSpeech()
+        } catch is CancellationError { }
+        catch {
+            guard turns.contains(id) else { return }
+            emit("totti_turn_error", turn: id, message: error.localizedDescription)
         }
     }
-
     struct Result { let user: String; let answer: String }
     enum RelayError: LocalizedError {
         case message(String)
@@ -203,35 +195,5 @@ final class TottiVoiceRelay {
         }
         return Result(user: user, answer: answer)
     }
-    private static func isExitPhrase(_ text: String) -> Bool {
-        TottiDeliveryPolicy.isExitPhrase(text)
-    }
-    private func reply(_ type: String, _ id: String, _ message: String) {
-        send(["type": type, "request_id": id, "message": message])
-    }
-    private func finish(_ id: String, endingSession: Bool = false) {
-        guard activeID == id else { return }
-        if endingSession { session.end() }
-        speechTimeout?.cancel()
-        speechTimeout = nil
-        activeID = nil
-        task = nil
-        finishedIDs.append(id)
-        if finishedIDs.count > 32 { finishedIDs.removeFirst() }
-        lastCompletionAt = ProcessInfo.processInfo.systemUptime
-        let eventType = endingSession ? "totti_session_end" : "totti_turn_done"
-        print("[TottiTiming] completion id=\(id) type=\(eventType) uptime=\(ProcessInfo.processInfo.systemUptime)")
-        send(["type": eventType, "request_id": id])
-        if endingSession { TottiConversationAudio.end() }
-        // Retain retries for a lost completion, but stop when the next capture arrives.
-        completionRetries.invalidate()
-        let retryToken = completionRetries.revision
-        Task { @MainActor [weak self] in
-            for _ in 0..<2 {
-                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
-                guard let self, self.completionRetries.isCurrent(retryToken) else { return }
-                self.send(["type": eventType, "request_id": id])
-            }
-        }
-    }
+
 }

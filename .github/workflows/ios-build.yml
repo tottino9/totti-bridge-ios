@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "codex/totti-continuous-*"
 
 jobs:
   build:
@@ -66,6 +67,17 @@ jobs:
             scripts/TottiDeliveryChecks.swift \
             -o build/totti-delivery-checks
           build/totti-delivery-checks
+
+      - name: Check continuous speech segmentation and late replies
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiPCMBuffer.swift \
+            RokidLyricsIOS/TottiDeliveryPolicy.swift \
+            RokidLyricsIOS/TottiDuplexPolicy.swift \
+            scripts/TottiDuplexChecks.swift \
+            -o build/totti-duplex-checks
+          build/totti-duplex-checks
 
       - name: Install tools
         run: brew install xcodegen
