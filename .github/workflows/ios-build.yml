@@ -27,6 +27,17 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Check Totti PCM and microphone lifecycle
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiPCMBuffer.swift \
+            RokidLyricsIOS/TottiCxrAudioCapture.swift \
+            scripts/TottiCaptureChecks.swift \
+            -o build/totti-capture-checks
+          build/totti-capture-checks
+
       - name: Install tools
         run: brew install xcodegen
 

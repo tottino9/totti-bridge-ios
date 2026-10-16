@@ -1,20 +1,8 @@
-import CryptoKit
 import Foundation
 
-/// Receives acknowledged WAV chunks and uses the iPhone network for the existing Worker.
+/// Uploads PCM captured through official CXR audio APIs using the iPhone network.
 @MainActor
 final class TottiVoiceRelay {
-    private struct Upload {
-        let id: String
-        let expectedBytes: Int
-        let chunks: Int
-        let chunkBytes: Int
-        let digest: String
-        var next = 0
-        var data = Data()
-        var touched = Date()
-    }
-    private var upload: Upload?
     private var activeID: String?
     private var task: Task<Void, Never>?
     private var speechTimeout: Task<Void, Never>?
@@ -27,84 +15,34 @@ final class TottiVoiceRelay {
         self.speech = speech
     }
 
-    func handle(_ fields: [String: Any]) -> Bool {
-        guard let type = fields["type"] as? String, type.hasPrefix("totti_voice_") else { return false }
-        guard let id = fields["request_id"] as? String, !id.isEmpty, id.utf8.count <= 128 else { return true }
-        if let old = upload, Date().timeIntervalSince(old.touched) > 45 {
-            upload = nil
-            reply("totti_error", old.id, "音声転送が途中で止まりました。")
+    var isBusy: Bool { activeID != nil }
+
+    func submitCaptured(_ id: String, wav: Data) {
+        guard !isBusy, !finishedIDs.contains(id), wav.count > 44 else {
+            reply("totti_error", id, "音声処理を開始できませんでした。")
+            return
         }
-        switch type {
-        case "totti_voice_begin":
-            if upload?.id == id { ack(id, -1); return true }
-            guard activeID == nil, upload == nil else {
-                reply("totti_error", id, "前の質問に回答中です。")
-                return true
-            }
-            let chunkBytes = fields["chunk_bytes"] as? Int ?? 2048
-            guard [128, 2048].contains(chunkBytes), !finishedIDs.contains(id),
-                  let bytes = fields["bytes"] as? Int, (45...1_048_576).contains(bytes),
-                  let chunks = fields["chunks"] as? Int, chunks == (bytes + chunkBytes - 1) / chunkBytes,
-                  let digest = fields["sha256"] as? String, digest.count == 64 else {
-                reply("totti_error", id, "音声転送の情報が不正です。")
-                return true
-            }
-            upload = Upload(id: id, expectedBytes: bytes, chunks: chunks, chunkBytes: chunkBytes, digest: digest)
-            ack(id, -1)
-            print("[TottiVoice] begin id=\(id) bytes=\(bytes) chunks=\(chunks)")
-        case "totti_voice_chunk":
-            guard var value = upload, value.id == id,
-                  let seq = fields["seq"] as? Int, seq >= 0, seq < value.chunks,
-                  let encoded = fields["data"] as? String, encoded.utf8.count <= 2800,
-                  let bytes = Data(base64Encoded: encoded), bytes.count <= value.chunkBytes else {
-                reply("totti_error", id, "音声転送の断片を読めませんでした。")
-                return true
-            }
-            if seq < value.next { ack(id, seq); return true }
-            guard seq == value.next,
-                  bytes.count == min(value.chunkBytes, value.expectedBytes - value.data.count) else {
-                upload = nil
-                reply("totti_error", id, "音声転送の順序が不正です。")
-                return true
-            }
-            value.data.append(bytes)
-            value.next += 1
-            value.touched = Date()
-            upload = value
-            ack(id, seq)
-        case "totti_voice_end":
-            if activeID == id || finishedIDs.contains(id) {
-                if let seq = fields["seq"] as? Int { ack(id, seq) }
-                return true
-            }
-            guard let value = upload, value.id == id,
-                  value.next == value.chunks, value.data.count == value.expectedBytes,
-                  SHA256.hash(data: value.data).map({ String(format: "%02x", $0) }).joined() == value.digest,
-                  value.data.prefix(4) == Data("RIFF".utf8),
-                  value.data.subdata(in: 8..<12) == Data("WAVE".utf8) else {
-                if upload?.id == id { upload = nil }
-                reply("totti_error", id, "転送した音声の検証に失敗しました。")
-                return true
-            }
-            upload = nil
-            activeID = id
-            ack(id, value.chunks)
-            reply("totti_status", id, "iPhoneからAIへ送信中…")
-            task = Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.askWorker(id, wav: value.data)
-            }
-        case "totti_voice_cancel":
-            if upload?.id == id { upload = nil }
-            if activeID == id {
-                task?.cancel()
-                speechTimeout?.cancel()
-                speech.cancel(requestID: id)
-                finish(id)
-            }
-        default: break
+        activeID = id
+        reply("totti_status", id, "iPhoneからAIへ送信中…")
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.askWorker(id, wav: wav)
         }
-        return true
+    }
+
+    func cancelCaptured(_ id: String) {
+        guard activeID == id else { return }
+        task?.cancel()
+        speechTimeout?.cancel()
+        speech.cancel(requestID: id)
+        finish(id)
+    }
+
+    func connectionLost() {
+        if let id = activeID {
+            reply("totti_error", id, "眼鏡との接続が切れたため音声処理を停止しました。")
+            cancelCaptured(id)
+        }
     }
 
     private func askWorker(_ id: String, wav: Data) async {
@@ -116,10 +54,12 @@ final class TottiVoiceRelay {
             var request = URLRequest(url: URL(string: "https://totti-ai.toshiakino-9.workers.dev/glasses/chat")!)
             request.httpMethod = "POST"
             request.timeoutInterval = 60
+            request.allowsCellularAccess = true
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             request.httpBody = body
             print("[TottiVoice] worker POST id=\(id) bytes=\(wav.count)")
+            reply("totti_capture_info", id, "WORKER_POST bytes=\(wav.count)")
             let (data, response) = try await URLSession.shared.data(for: request)
             try Task.checkCancellation()
             guard activeID == id else { return }
@@ -189,9 +129,6 @@ final class TottiVoiceRelay {
     }
     private static func isExitPhrase(_ text: String) -> Bool {
         ["バイバイ", "ばいばい", "さようなら", "終了", "終わり"].contains { text.contains($0) }
-    }
-    private func ack(_ id: String, _ seq: Int) {
-        send(["type": "totti_voice_ack", "request_id": id, "seq": seq])
     }
     private func reply(_ type: String, _ id: String, _ message: String) {
         send(["type": type, "request_id": id, "message": message])

@@ -36,6 +36,17 @@ final class LyricsCxrTransport: ObservableObject {
     private lazy var tottiVoice = TottiVoiceRelay(send: { [weak self] fields in
         self?.sendTottiJSON(fields)
     }, speech: tottiSpeech)
+    private var legacyMicStream = false
+    private let micStreamType = "asr"
+    private lazy var tottiCapture = TottiCxrAudioCapture(
+        send: { [weak self] fields in self?.sendTottiJSON(fields) },
+        start: { [weak self] in
+            guard let self else { return "transport unavailable" }
+            return self.startTottiMicStream()
+        },
+        stop: { [weak self] in self?.stopTottiMicStream() },
+        relay: tottiVoice
+    )
     #endif
     private let logger = Logger(subsystem: "app.nectarine4657.lime425", category: "CXR")
 
@@ -48,6 +59,8 @@ final class LyricsCxrTransport: ObservableObject {
     #if !targetEnvironment(simulator)
         private var link: (any RGCxrLink)?
         private var session: (any RGCxrCustomAppSession)?
+        private var boundSession: (any RGCxrCustomAppSession)?
+        private var boundLink: (any RGCxrLink)?
     #endif
 
     init() {
@@ -304,7 +317,52 @@ final class LyricsCxrTransport: ObservableObject {
             }
         }
 
+        private func startTottiMicStream() -> String? {
+            guard let session, protocolReady,
+                  session.state == .available || session.state == .started else {
+                return "CXR-L session not ready"
+            }
+            legacyMicStream = false
+            if let error = session.media.startAudioStream(codec: .pcm, mode: .xf) {
+                // This app uses global commands in customApp mode on SDK 1.0.4.
+                // Use the documented legacy record API only on immediate modeMismatch.
+                if error == .modeMismatch {
+                    legacyMicStream = true
+                    print("[TottiCapture] session media modeMismatch; legacy startRecord type=\(micStreamType)")
+                    if let fallback = CxrClient.shared.startRecord(micStreamType, codec: .pcm, mode: .xf) {
+                        return String(describing: fallback)
+                    }
+                } else { return String(describing: error) }
+            }
+            return nil
+        }
+
+        private func stopTottiMicStream() -> String? {
+            let error = legacyMicStream
+                ? CxrClient.shared.stopRecord(micStreamType)
+                : session?.media.stopAudioStream()
+            return error.map { String(describing: $0) }
+        }
+
         private func bindLegacyClientEvents() {
+            // One audio subscription only. Session and global publishers can mirror events.
+            CxrClient.shared.audioEventPublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] event in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        switch event {
+                        case .started(let value):
+                            self.tottiCapture.started(codec: value.codec,
+                                expectedPCM: Int32(RGCxrAudioCodec.pcm.rawValue),
+                                channels: value.channels, type: value.type)
+                        case .stream(let value): self.tottiCapture.receive(value.data)
+                        @unknown default: break
+                        }
+                    }
+                }
+                .store(in: &cancellables)
+
             CxrClient.shared.notifyEventPublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] event in
@@ -341,6 +399,8 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func bind(_ link: any RGCxrLink) {
+            if let boundLink, boundLink === link { return }
+            boundLink = link
             link.events.authStatePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] state in
@@ -357,6 +417,7 @@ final class LyricsCxrTransport: ObservableObject {
                         if connected {
                             self?.configureCustomAppSession()
                         } else {
+                            self?.tottiCapture.connectionLost()
                             self?.protocolReady = false
                             self?.subscriptionNotified = false
                             self?.status = DeviceStatus(
@@ -412,6 +473,8 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func bind(_ session: any RGCxrCustomAppSession) {
+            if let boundSession, boundSession === session { return }
+            boundSession = session
             session.statePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] event in
@@ -490,8 +553,10 @@ final class LyricsCxrTransport: ObservableObject {
                     ensureCustomAppOpen()
                 }
             case .paused:
+                tottiCapture.connectionLost()
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "CXR-L session paused.")
             case .unavailable:
+                tottiCapture.connectionLost()
                 protocolReady = false
                 subscriptionNotified = false
                 openLoopActive = false
@@ -571,7 +636,14 @@ final class LyricsCxrTransport: ObservableObject {
                   let type = fields["type"] as? String
             else { return false }
 
-            if tottiVoice.handle(fields) { return true }
+            if tottiCapture.handle(fields) { return true }
+            if type.hasPrefix("totti_voice_") {
+                if let id = fields["request_id"] as? String {
+                    sendTottiReply(type: "totti_error", requestID: id,
+                        message: "眼鏡アプリを公式音声取得版へ更新してください。")
+                }
+                return true
+            }
 
             if type == "totti_ping" {
                 sendTottiPong()
