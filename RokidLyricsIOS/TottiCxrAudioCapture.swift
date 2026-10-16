@@ -12,6 +12,9 @@ final class TottiCxrAudioCapture {
         var formatConfirmed = false
         var stopRequested = false
         var packets = 0
+        var pendingFormatData = Data()
+        var pendingFormatAt: TimeInterval?
+        var lastAckAt: TimeInterval = -Double.infinity
     }
     private var recording: Recording?
     private var watchdog: Task<Void, Never>?
@@ -32,7 +35,7 @@ final class TottiCxrAudioCapture {
         guard let id = fields["request_id"] as? String, !id.isEmpty, id.utf8.count <= 128 else { return true }
         switch type {
         case "totti_mic_start":
-            if recording?.id == id { reply("totti_mic_ack", id, "start"); return true }
+            if recording?.id == id { acknowledgeStart(id); return true }
             // Legacy and session notify publishers can deliver the same command twice.
             if recentIDs.contains(id) { return true }
             guard recording == nil, !relay.isBusy else {
@@ -41,7 +44,7 @@ final class TottiCxrAudioCapture {
             recording = Recording(id: id, began: ProcessInfo.processInfo.systemUptime)
             print("[TottiCapture] START id=\(id) PCM16 sampleRate=\(TottiPCMBuffer.sampleRate) (hardware format pending)")
             if let error = startStream() { fail("公式音声取得の開始失敗: \(error)"); return true }
-            reply("totti_mic_ack", id, "start")
+            acknowledgeStart(id)
             reply("totti_status", id, "眼鏡の音声接続を準備中…")
             watchdog = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
@@ -60,6 +63,15 @@ final class TottiCxrAudioCapture {
         return true
     }
 
+    private func acknowledgeStart(_ id: String) {
+        guard var value = recording, value.id == id else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - value.lastAckAt >= 10 else { return }
+        value.lastAckAt = now
+        recording = value
+        reply("totti_mic_ack", id, "start")
+    }
+
     func started(codec: Int32, expectedPCM: Int32, channels: UInt32, type: String) {
         guard recording != nil else { return }
         print("[TottiCapture] FORMAT codec=\(codec) channels=\(channels) type=\(type)")
@@ -69,6 +81,10 @@ final class TottiCxrAudioCapture {
         guard recording?.buffer.data.isEmpty == true else { return }
         recording?.buffer.channels = Int(channels)
         recording?.formatConfirmed = true
+        let pending = recording?.pendingFormatData ?? Data()
+        recording?.pendingFormatData = Data()
+        recording?.pendingFormatAt = nil
+        if !pending.isEmpty { receive(pending) }
         if let id = recording?.id {
             reply("totti_capture_info", id, "FORMAT codec=\(codec) channels=\(channels) configuredRate=\(TottiPCMBuffer.sampleRate)")
         }
@@ -77,7 +93,17 @@ final class TottiCxrAudioCapture {
     func receive(_ data: Data) {
         guard var value = recording, !data.isEmpty else { return }
         guard value.formatConfirmed else {
-            fail("音声形式の開始通知を受信する前に音声が届きました。"); return
+            guard value.pendingFormatData.count + data.count <= 128_000 else {
+                fail("音声形式の通知待ちデータが128KBを超えました。"); return
+            }
+            if value.pendingFormatAt == nil {
+                value.pendingFormatAt = ProcessInfo.processInfo.systemUptime
+                print("[TottiCapture] DATA_BEFORE_FORMAT id=\(value.id) bytes=\(data.count)")
+                reply("totti_capture_info", value.id, "DATA_BEFORE_FORMAT bytes=\(data.count)")
+            }
+            value.pendingFormatData.append(data)
+            recording = value
+            return
         }
         let now = ProcessInfo.processInfo.systemUptime
         if value.firstDataAt == nil {
@@ -100,6 +126,9 @@ final class TottiCxrAudioCapture {
     private func tick() {
         guard let value = recording, !value.stopRequested else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        if !value.formatConfirmed, let began = value.pendingFormatAt, now - began > 2 {
+            fail("音声データは届きましたが、公式SDKの形式通知が2秒以内に届きませんでした（bytes=\(value.pendingFormatData.count)）。"); return
+        }
         if value.firstDataAt == nil, now - value.began > 10 {
             fail("公式SDKから眼鏡の音声が10秒以内に届きませんでした。"); return
         }

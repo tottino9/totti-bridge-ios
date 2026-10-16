@@ -349,7 +349,9 @@ final class LyricsCxrTransport: ObservableObject {
             CxrClient.shared.audioEventPublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] event in
-                    Task { @MainActor in
+                    // receive(on:) serializes SDK events on the main queue. Do not
+                    // create independent Tasks that can reorder format and PCM delivery.
+                    MainActor.assumeIsolated {
                         guard let self else { return }
                         switch event {
                         case .started(let value):
