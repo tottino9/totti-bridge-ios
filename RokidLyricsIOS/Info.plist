@@ -41,7 +41,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Rokid Lyrics uses the local network when the Rokid CXR-L session opens a direct link to the glasses.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Rokid Lyrics requests Rokid CXR-L microphone scope so the glasses link can authorize custom app transport.</string>
+	<string>Totti AI records the Bluetooth microphone of your Rokid glasses to answer your spoken questions.</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>rokidai</string>

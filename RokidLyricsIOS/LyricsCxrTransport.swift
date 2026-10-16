@@ -38,13 +38,8 @@ final class LyricsCxrTransport: ObservableObject {
     }, speech: tottiSpeech)
     private var legacyMicStream = false
     private let micStreamType = "asr"
-    private lazy var tottiCapture = TottiCxrAudioCapture(
+    private lazy var tottiCapture = TottiHFPCapture(
         send: { [weak self] fields in self?.sendTottiJSON(fields) },
-        start: { [weak self] in
-            guard let self else { return "transport unavailable" }
-            return self.startTottiMicStream()
-        },
-        stop: { [weak self] in self?.stopTottiMicStream() },
         relay: tottiVoice
     )
     #endif
@@ -345,26 +340,7 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func bindLegacyClientEvents() {
-            // One audio subscription only. Session and global publishers can mirror events.
-            CxrClient.shared.audioEventPublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] event in
-                    // receive(on:) serializes SDK events on the main queue. Do not
-                    // create independent Tasks that can reorder format and PCM delivery.
-                    MainActor.assumeIsolated {
-                        guard let self else { return }
-                        switch event {
-                        case .started(let value):
-                            self.tottiCapture.started(codec: value.codec,
-                                expectedPCM: Int32(RGCxrAudioCodec.pcm.rawValue),
-                                channels: value.channels, type: value.type)
-                        case .stream(let value): self.tottiCapture.receive(value.data)
-                        @unknown default: break
-                        }
-                    }
-                }
-                .store(in: &cancellables)
-
+            // HFP supplies microphone audio; CXR is used only for control and HUD.
             CxrClient.shared.notifyEventPublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] event in

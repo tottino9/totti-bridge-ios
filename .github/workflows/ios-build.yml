@@ -38,6 +38,17 @@ jobs:
             -o build/totti-capture-checks
           build/totti-capture-checks
 
+      - name: Check HFP input policy and recorded WAV validation
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiPCMBuffer.swift \
+            RokidLyricsIOS/TottiHFPInputPolicy.swift \
+            scripts/TottiHFPChecks.swift \
+            -o build/totti-hfp-checks
+          build/totti-hfp-checks
+
       - name: Install tools
         run: brew install xcodegen
 
