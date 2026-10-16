@@ -58,3 +58,19 @@ struct TottiDuplexTurns {
     func contains(_ id: String) -> Bool { !closed && pending.contains(id) }
     mutating func close() { closed = true; pending.removeAll() }
 }
+
+/// Duplicate SDK deliveries and Android retries must not flood the control link.
+struct TottiStartReplyPolicy {
+    private var lastAcceptedAt = -Double.infinity
+    private var announcedReady = false
+    mutating func shouldAcknowledge(at now: TimeInterval) -> Bool {
+        guard now - lastAcceptedAt >= 10 else { return false }
+        lastAcceptedAt = now
+        return true
+    }
+    mutating func shouldAnnounceReady() -> Bool {
+        guard !announcedReady else { return false }
+        announcedReady = true
+        return true
+    }
+}

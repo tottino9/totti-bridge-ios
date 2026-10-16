@@ -16,6 +16,7 @@ final class TottiHFPCapture {
     private var watchdog: Task<Void, Never>?
     private var generation = UUID()
     private var ready = false
+    private var startReplies = TottiStartReplyPolicy()
     private var segmenter = TottiDuplexSegmenter()
     private var startedAt = 0.0
     private var lastFrameAt = 0.0
@@ -31,13 +32,15 @@ final class TottiHFPCapture {
         guard let id = fields["request_id"] as? String, !id.isEmpty, id.utf8.count <= 128 else { return true }
         switch type {
         case "totti_mic_start":
-            if activeID == id { if ready { announceReady() }; return true }
+            if activeID == id { acknowledgeStart(id); return true }
             guard activeID == nil else { return true }
             guard relay.acceptSession(fields["session_id"] as? String ?? "legacy") else {
                 send(["type": "totti_session_end", "request_id": id]); return true
             }
             activeID = id; generation = UUID(); ready = false; segmenter = TottiDuplexSegmenter()
             startedAt = ProcessInfo.processInfo.systemUptime; lastFrameAt = startedAt; quietSince = startedAt
+            startReplies = TottiStartReplyPolicy()
+            acknowledgeStart(id)
             lastHeartbeatAt = startedAt
             relay.beginContinuous(id)
             startup = Task { @MainActor [weak self] in
@@ -175,8 +178,12 @@ final class TottiHFPCapture {
             }
         }
     }
+    private func acknowledgeStart(_ id: String) {
+        guard startReplies.shouldAcknowledge(at: ProcessInfo.processInfo.systemUptime) else { return }
+        send(["type": "totti_mic_ack", "request_id": id, "message": "start"])
+    }
     private func announceReady() {
-        guard let activeID, ready else { return }
+        guard let activeID, ready, startReplies.shouldAnnounceReady() else { return }
         send(["type": "totti_listening", "request_id": activeID, "message": "話しかけてください",
               "prepare_ms": Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000), "duplex": true])
     }

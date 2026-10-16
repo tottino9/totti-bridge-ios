@@ -19,7 +19,9 @@ final class LyricsCxrTransport: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var protocolReady = false
-    private var tottiTrafficActive = false
+    // This build is the Totti bridge. Do not queue legacy lyrics hello/status/
+    // snapshot packets before the first voice command. SDK session auth is separate.
+    private var tottiTrafficActive = true
         private var userEndedTotti = false
     private var subscriptionNotified = false
     private var didOpenCustomApp = false
