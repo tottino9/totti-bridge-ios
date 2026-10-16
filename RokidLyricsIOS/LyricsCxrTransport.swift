@@ -444,7 +444,7 @@ final class LyricsCxrTransport: ObservableObject {
                     type: .customApp,
                     customAppPackageName: TransportConstants.cxrCustomAppPackageName,
                     appDisplayName: "Rokid Lyrics",
-                    aiInterceptMode: .allowWithPause
+                    aiInterceptMode: .blockAI
                 )
             ) as? any RGCxrCustomAppSession)
             guard let session else {
