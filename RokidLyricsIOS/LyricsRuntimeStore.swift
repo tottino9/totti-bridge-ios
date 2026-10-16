@@ -1949,9 +1949,14 @@ final class BackgroundAudioKeepAlive {
     private var configured = false
     private var active = false
 
+    init() {
+        TottiAudioGate.suspendLegacyAudio = { [weak self] in self?.stop() }
+    }
+
     /// Idempotent; safe to call every tick. Revives the session if iOS tore it down after an
     /// interruption (e.g. a phone call), since the per-tick caller keeps requesting `active`.
     func update(active shouldBeActive: Bool) {
+        guard !TottiAudioGate.isHeld else { return }
         if shouldBeActive {
             if !active || !engine.isRunning || !player.isPlaying { start() }
         } else {

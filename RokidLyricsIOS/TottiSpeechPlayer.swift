@@ -10,6 +10,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
     private var report: ((String, String) -> Void)?
     private var completed: (() -> Void)?
     private var requestID = ""
+    private var audioOwner: String?
     private var startTimeout: Task<Void, Never>?
 
     override init() {
@@ -29,6 +30,13 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
             completed?()
             return
         }
+        let owner = "speech:" + requestID
+        guard TottiAudioGate.acquire(owner) else {
+            report("totti_audio_error", "録音中のため読み上げを開始できません。")
+            completed?()
+            return
+        }
+        audioOwner = owner
         let session = AVAudioSession.sharedInstance()
         do {
             // Matches the existing background keep-alive session. Do not deactivate
@@ -36,6 +44,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
             try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
         } catch {
+            releaseAudioOwnership()
             report("totti_audio_error", "音声出力の準備失敗: \(error.localizedDescription)")
             completed?()
             return
@@ -45,6 +54,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         print("[TottiAudio] route id=\(requestID) output=\(route) volume=\(session.outputVolume)")
         report("totti_audio_status", "出力先: \(route) / 音量: \(session.outputVolume)")
         guard outputs.contains(where: { $0.portType == .bluetoothA2DP || $0.portType == .bluetoothHFP }) else {
+            releaseAudioOwnership()
             report("totti_audio_error", "Bluetooth音声出力が未選択です。iPhoneの再生出力先をRokidにしてください。")
             completed?()
             return
@@ -61,8 +71,8 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         startTimeout = Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
             guard let self, self.current != nil else { return }
-            self.finish(type: "totti_audio_error", message: "読み上げ開始を15秒以内に確認できませんでした。")
             self.synthesizer.stopSpeaking(at: .immediate)
+            self.finish(type: "totti_audio_error", message: "読み上げ開始を15秒以内に確認できませんでした。")
         }
     }
 
@@ -74,6 +84,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         report = nil
         current = nil
         synthesizer.stopSpeaking(at: .immediate)
+        releaseAudioOwnership()
     }
 
     private func finish(type: String, message: String) {
@@ -85,7 +96,13 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         report?(type, message)
         current = nil
         report = nil
+        releaseAudioOwnership()
         callback?()
+    }
+
+    private func releaseAudioOwnership() {
+        if let owner = audioOwner { TottiAudioGate.release(owner) }
+        audioOwner = nil
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {

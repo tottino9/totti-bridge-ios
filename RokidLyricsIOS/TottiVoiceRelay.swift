@@ -60,7 +60,9 @@ final class TottiVoiceRelay {
             request.httpBody = body
             print("[TottiVoice] worker POST id=\(id) bytes=\(wav.count)")
             reply("totti_capture_info", id, "WORKER_POST bytes=\(wav.count)")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            request.allowsCellularAccess = true
+            let metrics = TottiNetworkMetrics()
+            let (data, response) = try await URLSession.shared.data(for: request, delegate: metrics)
             try Task.checkCancellation()
             guard activeID == id else { return }
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
@@ -76,7 +78,8 @@ final class TottiVoiceRelay {
                 finish(id)
                 return
             }
-            reply("totti_answer", id, result.answer)
+            send(["type": "totti_answer", "request_id": id, "message": result.answer,
+                  "network_transport": metrics.transport])
             speechTimeout = Task { @MainActor [weak self] in
                 do { try await Task.sleep(nanoseconds: 90_000_000_000) } catch { return }
                 guard let self, self.activeID == id else { return }

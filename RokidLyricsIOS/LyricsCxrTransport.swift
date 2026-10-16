@@ -395,7 +395,7 @@ final class LyricsCxrTransport: ObservableObject {
                         if connected {
                             self?.configureCustomAppSession()
                         } else {
-                            self?.tottiCapture.connectionLost()
+                            self?.tottiCapture.connectionLost(reason: "linkDisconnected")
                             self?.protocolReady = false
                             self?.subscriptionNotified = false
                             self?.status = DeviceStatus(
@@ -517,7 +517,7 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func handleSessionState(_ event: RGCxrSessionStateEvent) {
-            print("[RokidLyricsCXR] sessionState \(event.state.rawValue)")
+            print("[RokidLyricsCXR] sessionState \(event.state.rawValue) reason=\(event.reason?.rawValue ?? "unknown")")
             switch event.state {
             case .available, .started:
                 markProtocolReady()
@@ -531,10 +531,10 @@ final class LyricsCxrTransport: ObservableObject {
                     ensureCustomAppOpen()
                 }
             case .paused:
-                tottiCapture.connectionLost()
+                tottiCapture.controlPaused(reason: event.reason?.rawValue)
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "CXR-L session paused.")
             case .unavailable:
-                tottiCapture.connectionLost()
+                tottiCapture.connectionLost(reason: "sessionUnavailable/" + (event.reason?.rawValue ?? "unknown"))
                 protocolReady = false
                 subscriptionNotified = false
                 openLoopActive = false

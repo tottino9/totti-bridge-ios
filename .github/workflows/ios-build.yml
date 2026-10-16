@@ -49,6 +49,15 @@ jobs:
             -o build/totti-hfp-checks
           build/totti-hfp-checks
 
+      - name: Check audio ownership and CXR pause policy
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiAudioGate.swift \
+            scripts/TottiAudioGateChecks.swift \
+            -o build/totti-audio-gate-checks
+          build/totti-audio-gate-checks
+
       - name: Install tools
         run: brew install xcodegen
 
