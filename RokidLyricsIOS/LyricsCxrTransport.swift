@@ -60,6 +60,42 @@ final class LyricsCxrTransport: ObservableObject {
         private var session: (any RGCxrCustomAppSession)?
         private var boundSession: (any RGCxrCustomAppSession)?
         private var boundLink: (any RGCxrLink)?
+        private var linkBindingEpoch = UUID()
+        private var sessionBindingEpoch = UUID()
+        private var linkSubscriptions = Set<AnyCancellable>()
+        private var sessionSubscriptions = Set<AnyCancellable>()
+        private var controlLossTask: Task<Void, Never>?
+        private var controlLossToken = UUID()
+
+        // A control-link notification is not evidence that HFP audio has stopped.
+        // Keep the existing capture during a brief SDK reconnect; a genuine loss
+        // still terminates after this bounded recovery interval.
+        private func controlRecovered() {
+            controlLossToken = UUID()
+            controlLossTask?.cancel()
+            controlLossTask = nil
+        }
+
+        private func deferControlLoss(reason: String) {
+            guard controlLossTask == nil else { return }
+            let token = UUID()
+            controlLossToken = token
+            print("[TottiControl] recovery_wait reason=\(reason)")
+            controlLossTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 8_000_000_000) }
+                catch { return }
+                guard let self, self.controlLossToken == token else { return }
+                self.controlLossTask = nil
+                self.tottiCapture.connectionLost(reason: reason)
+                self.protocolReady = false
+                self.subscriptionNotified = false
+                self.openLoopActive = false
+                self.didOpenCustomApp = false
+                print("[TottiControl] recovery_expired reason=\(reason)")
+                self.status = DeviceStatus(connectionState: .connecting,
+                    statusLabel: "CXR-L control connection lost. Reconnect required.")
+            }
+        }
     #endif
 
     init() {
@@ -385,25 +421,30 @@ final class LyricsCxrTransport: ObservableObject {
         private func bind(_ link: any RGCxrLink) {
             if let boundLink, boundLink === link { return }
             boundLink = link
+            controlRecovered()
+            linkSubscriptions.removeAll()
+            linkBindingEpoch = UUID()
+            let bindingEpoch = linkBindingEpoch
             link.events.authStatePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] state in
                     Task { @MainActor in
+                        guard self?.linkBindingEpoch == bindingEpoch else { return }
                         self?.handleAuthState(state)
                     }
                 }
-                .store(in: &cancellables)
+                .store(in: &linkSubscriptions)
 
             link.events.connectionStatePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] connected in
                     Task { @MainActor in
+                        guard self?.linkBindingEpoch == bindingEpoch else { return }
                         if connected {
+                            self?.controlRecovered()
                             self?.configureCustomAppSession()
                         } else {
-                            self?.tottiCapture.connectionLost(reason: "linkDisconnected")
-                            self?.protocolReady = false
-                            self?.subscriptionNotified = false
+                            self?.deferControlLoss(reason: "linkDisconnected")
                             self?.status = DeviceStatus(
                                 connectionState: .connecting,
                                 statusLabel: "CXR-L link disconnected. BLE fallback remains active."
@@ -411,7 +452,7 @@ final class LyricsCxrTransport: ObservableObject {
                         }
                     }
                 }
-                .store(in: &cancellables)
+                .store(in: &linkSubscriptions)
         }
 
         private func configureCustomAppSession() {
@@ -459,23 +500,28 @@ final class LyricsCxrTransport: ObservableObject {
         private func bind(_ session: any RGCxrCustomAppSession) {
             if let boundSession, boundSession === session { return }
             boundSession = session
+            sessionSubscriptions.removeAll()
+            sessionBindingEpoch = UUID()
+            let bindingEpoch = sessionBindingEpoch
             session.statePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] event in
                     Task { @MainActor in
+                        guard self?.sessionBindingEpoch == bindingEpoch else { return }
                         self?.handleSessionState(event)
                     }
                 }
-                .store(in: &cancellables)
+                .store(in: &sessionSubscriptions)
 
             session.commandEvents.notifyPublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] event in
                     Task { @MainActor in
+                        guard self?.sessionBindingEpoch == bindingEpoch else { return }
                         self?.handleNotify(event)
                     }
                 }
-                .store(in: &cancellables)
+                .store(in: &sessionSubscriptions)
         }
 
         private func handleAuthState(_ state: RGCxrClientAuthState) {
@@ -526,6 +572,7 @@ final class LyricsCxrTransport: ObservableObject {
             print("[RokidLyricsCXR] sessionState \(event.state.rawValue) reason=\(event.reason?.rawValue ?? "unknown")")
             switch event.state {
             case .available, .started:
+                controlRecovered()
                 markProtocolReady()
                 status = DeviceStatus(connectionState: .connected, statusLabel: "CXR-L session \(event.state.rawValue).", bluetoothClientCount: 1)
                 // Now that the session is genuinely available, (re)register the global notify
@@ -540,11 +587,7 @@ final class LyricsCxrTransport: ObservableObject {
                 tottiCapture.controlPaused(reason: event.reason?.rawValue)
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "CXR-L session paused.")
             case .unavailable:
-                tottiCapture.connectionLost(reason: "sessionUnavailable/" + (event.reason?.rawValue ?? "unknown"))
-                protocolReady = false
-                subscriptionNotified = false
-                openLoopActive = false
-                didOpenCustomApp = false
+                deferControlLoss(reason: "sessionUnavailable/" + (event.reason?.rawValue ?? "unknown"))
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "CXR-L session unavailable.")
             @unknown default:
                 protocolReady = false
@@ -807,7 +850,7 @@ final class LyricsCxrTransport: ObservableObject {
                 return
             }
 
-            if handleTottiCommand(event.subCmd) { return }
+            if handleTottiCommand(event.subCmd) { controlRecovered(); return }
 
             guard let data = event.payload ?? event.payloadEx,
                   let json = CxrCapsCodec.decodeJSONPayload(data)
@@ -815,6 +858,7 @@ final class LyricsCxrTransport: ObservableObject {
                 logger.warning("Dropped unparseable CXR-L notify")
                 return
             }
+            controlRecovered()
             if handleTottiCommand(json) { return }
 
             guard
