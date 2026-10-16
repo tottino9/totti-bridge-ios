@@ -34,6 +34,8 @@ final class LyricsCxrTransport: ObservableObject {
     private let maxSendAttempts = 3
     private var lastTottiPongTime: TimeInterval?
     private var tottiRequestIDs: [String] = []
+    private var tottiWireVersions: [String: Int] = [:]
+    private var tottiWireRequests: [String] = []
     private var tottiRequestInFlight = false
     private let tottiSpeech = TottiSpeechPlayer()
     #if !targetEnvironment(simulator)
@@ -629,6 +631,12 @@ final class LyricsCxrTransport: ObservableObject {
             else { return false }
 
             if type.hasPrefix("totti_") { activateTottiTraffic() }
+            if type == "totti_mic_start", let id = fields["request_id"] as? String,
+               tottiWireVersions[id] == nil {
+                tottiWireVersions[id] = (fields["wire_v"] as? Int) == 2 ? 2 : 1
+                tottiWireRequests.append(id)
+                if tottiWireRequests.count > 32 { tottiWireVersions[tottiWireRequests.removeFirst()] = nil }
+            }
             if tottiCapture.handle(fields) {
                 if type == "totti_mic_start" && !tottiVoice.sessionEnded { userEndedTotti = false }
                 return true
@@ -742,7 +750,11 @@ final class LyricsCxrTransport: ObservableObject {
                 print("[TottiLocal] \(type) id=\(fields["request_id"] ?? "") \(fields["message"] ?? "")")
                 return
             }
-            guard let data = try? JSONSerialization.data(withJSONObject: fields) else { return }
+            let requestID = fields["request_id"] as? String ?? ""
+            let version = tottiWireVersions[requestID] ?? 1
+            let packet = TottiWireCodec.encode(fields, negotiatedVersion: version)
+            guard let data = try? JSONSerialization.data(withJSONObject: packet) else { return }
+            print("[TottiPerf] stage=cxr_send id=\(requestID) type=\(fields["type"] ?? "") version=\(version) bytes=\(data.count) at=\(ProcessInfo.processInfo.systemUptime)")
             let error = CxrClient.shared.sendCustomCmd(
                 cmd: TransportConstants.cxrPhoneToGlassesCommand,
                 payload: data,

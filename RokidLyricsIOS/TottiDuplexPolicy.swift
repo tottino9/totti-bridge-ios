@@ -1,12 +1,16 @@
 import Foundation
 
 /// Pure PCM segmentation, independent of the audio route and network.
-/// 16 kHz mono signed little-endian PCM. Keep 350 ms before speech detection.
+/// 16 kHz mono signed little-endian PCM. Keep 450 ms before speech detection.
 struct TottiDuplexSegmenter {
     enum Event { case began, ended(Data) }
+    // Preserve pauses up to 1.2 s; avoid the old unconditional 2 s tail.
+    static let endSilenceSeconds: TimeInterval = 1.2
     private var preRoll = Data()
     private var pcm = Data()
-    private var voicedSeconds = 0.0
+    private struct Evidence { var duration: Double; let voiced: Bool }
+    private var evidence: [Evidence] = []
+    private var evidenceDuration = 0.0
     private var quietSeconds = 0.0
     private(set) var speaking = false
     mutating func append(_ bytes: Data) -> [Event] {
@@ -23,15 +27,27 @@ struct TottiDuplexSegmenter {
         let loud = sqrt(squares / Double(bytes.count / 2)) >= 0.01
         if !speaking {
             preRoll.append(bytes)
-            if preRoll.count > 11200 { preRoll.removeFirst(preRoll.count - 11200) }
-            voicedSeconds = loud ? voicedSeconds + duration : 0
-            guard voicedSeconds >= 0.18 else { return [] }
+            if preRoll.count > 14400 { preRoll.removeFirst(preRoll.count - 14400) }
+            evidence.append(Evidence(duration: duration, voiced: loud))
+            evidenceDuration += duration
+            while evidenceDuration > 0.4 && !evidence.isEmpty {
+                let excess = evidenceDuration - 0.4
+                if evidence[0].duration <= excess + 0.000001 {
+                    evidenceDuration -= evidence.removeFirst().duration
+                } else {
+                    evidence[0].duration -= excess; evidenceDuration = 0.4
+                }
+            }
+            // Japanese syllables contain brief unvoiced gaps. The old detector
+            // reset all evidence on EVERY quiet buffer, missing natural words.
+            let voicedSeconds = evidence.filter { $0.voiced }.reduce(0) { $0 + $1.duration }
+            guard voicedSeconds >= 0.15 - 0.000001 else { return [] }
             speaking = true; quietSeconds = 0; pcm = preRoll; preRoll.removeAll(keepingCapacity: true)
             return [.began]
         }
         pcm.append(bytes)
         quietSeconds = loud ? 0 : quietSeconds + duration
-        if quietSeconds >= TottiDeliveryPolicy.silenceSeconds || pcm.count >= 16000 * 2 * 30 {
+        if quietSeconds >= Self.endSilenceSeconds || pcm.count >= 16000 * 2 * 30 {
             return finish()
         }
         return []
@@ -61,16 +77,26 @@ struct TottiDuplexTurns {
 
 /// Duplicate SDK deliveries and Android retries must not flood the control link.
 struct TottiStartReplyPolicy {
-    private var lastAcceptedAt = -Double.infinity
+    private var lastReadyAt = -Double.infinity
     private var announcedReady = false
-    mutating func shouldAcknowledge(at now: TimeInterval) -> Bool {
-        guard now - lastAcceptedAt >= 10 else { return false }
-        lastAcceptedAt = now
+    mutating func shouldAnnounceReady(at now: TimeInterval, retry: Bool = false) -> Bool {
+        guard !announcedReady || (retry && now - lastReadyAt >= 10) else { return false }
+        announcedReady = true
+        lastReadyAt = now
         return true
     }
-    mutating func shouldAnnounceReady() -> Bool {
-        guard !announcedReady else { return false }
-        announcedReady = true
+}
+
+/// A first callback alone can be an empty/warm-up slice. Announce readiness
+/// only after 200 ms of actual converted PCM; early speech is still segmented.
+struct TottiInputReadiness {
+    private var frames = 0
+    private var announced = false
+    mutating func accept(pcmBytes: Int) -> Bool {
+        guard pcmBytes > 0, pcmBytes.isMultiple(of: 2), !announced else { return false }
+        frames = min(3200, frames + min(3200, pcmBytes / 2))
+        guard frames >= 3200 else { return false }
+        announced = true
         return true
     }
 }

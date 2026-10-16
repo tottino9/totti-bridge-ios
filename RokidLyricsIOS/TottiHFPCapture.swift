@@ -16,6 +16,7 @@ final class TottiHFPCapture {
     private var watchdog: Task<Void, Never>?
     private var generation = UUID()
     private var ready = false
+    private var inputReadiness = TottiInputReadiness()
     private var startReplies = TottiStartReplyPolicy()
     private var segmenter = TottiDuplexSegmenter()
     private var startedAt = 0.0
@@ -32,12 +33,12 @@ final class TottiHFPCapture {
         guard let id = fields["request_id"] as? String, !id.isEmpty, id.utf8.count <= 128 else { return true }
         switch type {
         case "totti_mic_start":
-            if activeID == id { return true }
+            if activeID == id { if ready { announceReady(retry: true) }; return true }
             guard activeID == nil else { return true }
             guard relay.acceptSession(fields["session_id"] as? String ?? "legacy") else {
                 send(["type": "totti_session_end", "request_id": id]); return true
             }
-            activeID = id; generation = UUID(); ready = false; segmenter = TottiDuplexSegmenter()
+            activeID = id; generation = UUID(); ready = false; inputReadiness = TottiInputReadiness(); segmenter = TottiDuplexSegmenter()
             startedAt = ProcessInfo.processInfo.systemUptime; lastFrameAt = startedAt; quietSince = startedAt
             startReplies = TottiStartReplyPolicy()
             lastHeartbeatAt = startedAt
@@ -68,6 +69,7 @@ final class TottiHFPCapture {
             }
         @unknown default: permitted = false
         }
+        print("[TottiPerf] stage=permission_ready id=\(id) at=\(ProcessInfo.processInfo.systemUptime)")
         try Task.checkCancellation()
         guard activeID == id else { return }
         guard permitted else { throw Failure.message("iPhoneの設定でマイク利用を許可してください。") }
@@ -104,11 +106,13 @@ final class TottiHFPCapture {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         guard activeID == id, validRoute() else { throw Failure.message("眼鏡のマイクへの切替を確認できませんでした。") }
+        print("[TottiPerf] stage=hfp_route_ready id=\(id) at=\(ProcessInfo.processInfo.systemUptime)")
         let capture = AVAudioEngine()
         engine = capture
         // Must be enabled while stopped. AEC support on the actual HFP device
         // remains a hardware test gate; never fall back silently to raw echo.
         try capture.inputNode.setVoiceProcessingEnabled(true)
+        print("[TottiPerf] stage=aec_ready id=\(id) at=\(ProcessInfo.processInfo.systemUptime)")
         let source = capture.inputNode.outputFormat(forBus: 0)
         guard source.sampleRate > 0, source.channelCount > 0,
               let destination = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
@@ -138,6 +142,7 @@ final class TottiHFPCapture {
         }
         tapInstalled = true
         capture.prepare(); try capture.start()
+        print("[TottiPerf] stage=engine_started id=\(id) at=\(ProcessInfo.processInfo.systemUptime)")
         guard validRoute() else { throw Failure.message("音声処理開始時に眼鏡のマイクが切れました。") }
         observeInterruptions()
         watchdog = Task { @MainActor [weak self] in
@@ -171,7 +176,10 @@ final class TottiHFPCapture {
         guard token == generation, activeID != nil else { return }
         guard validRoute() else { fail("眼鏡のマイク接続が切れました。"); return }
         lastFrameAt = ProcessInfo.processInfo.systemUptime
-        if !ready { ready = true; announceReady() }
+        if !ready && inputReadiness.accept(pcmBytes: bytes.count) {
+            print("[TottiPerf] stage=first_pcm id=\(activeID ?? "") at=\(lastFrameAt)")
+            ready = true; announceReady()
+        }
         consume(segmenter.append(bytes))
     }
     private func consume(_ events: [TottiDuplexSegmenter.Event]) {
@@ -182,20 +190,29 @@ final class TottiHFPCapture {
             }
         }
     }
-    private func announceReady() {
-        guard let activeID, ready, startReplies.shouldAnnounceReady() else { return }
+    private func announceReady(retry: Bool = false) {
+        guard let activeID, ready, engine?.isRunning == true, validRoute(),
+              startReplies.shouldAnnounceReady(at: ProcessInfo.processInfo.systemUptime, retry: retry) else { return }
         send(["type": "totti_listening", "request_id": activeID, "message": "話しかけてください",
               "prepare_ms": Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000), "duplex": true])
     }
     private func observeInterruptions() {
+        let token = generation
         for name in [AVAudioSession.interruptionNotification, AVAudioSession.mediaServicesWereResetNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
-                [weak self] _ in Task { @MainActor [weak self] in self?.fail("iPhoneの音声処理が中断されました。会話を再開してください。") }
+                [weak self] notification in
+                let interruptionBegan = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    == AVAudioSession.InterruptionType.began.rawValue
+                Task { @MainActor [weak self] in
+                    guard let self, self.generation == token, self.activeID != nil else { return }
+                    if name == AVAudioSession.interruptionNotification && !interruptionBegan { return }
+                    self.fail("iPhoneの音声処理が中断されました。会話を再開してください。")
+                }
             })
         }
         observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) {
             [weak self] _ in Task { @MainActor [weak self] in
-                guard let self, self.activeID != nil else { return }
+                guard let self, self.generation == token, self.activeID != nil else { return }
                 if !self.validRoute() { self.fail("眼鏡の音声接続が変更されたため停止しました。") }
             }
         })
@@ -227,7 +244,7 @@ final class TottiHFPCapture {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }; observers.removeAll()
         if let engine { engine.stop(); if tapInstalled { engine.inputNode.removeTap(onBus: 0) } }
         tapInstalled = false
-        engine = nil; activeID = nil; selectedUID = nil; ready = false; segmenter = TottiDuplexSegmenter()
+        engine = nil; activeID = nil; selectedUID = nil; ready = false; inputReadiness = TottiInputReadiness(); segmenter = TottiDuplexSegmenter()
     }
     private enum Failure: LocalizedError {
         case message(String)

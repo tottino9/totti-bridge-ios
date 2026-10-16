@@ -75,9 +75,23 @@ jobs:
             RokidLyricsIOS/TottiPCMBuffer.swift \
             RokidLyricsIOS/TottiDeliveryPolicy.swift \
             RokidLyricsIOS/TottiDuplexPolicy.swift \
+            RokidLyricsIOS/TottiWireCodec.swift \
+            scripts/TottiLegacySegmenterForChecks.swift \
             scripts/TottiDuplexChecks.swift \
             -o build/totti-duplex-checks
           build/totti-duplex-checks
+
+      - name: Check concurrent replies, speech interruption and response formats
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiVoiceRelay.swift \
+            RokidLyricsIOS/TottiPCMBuffer.swift \
+            RokidLyricsIOS/TottiDuplexPolicy.swift \
+            RokidLyricsIOS/TottiDeliveryPolicy.swift \
+            scripts/TottiRelayChecks.swift \
+            -o build/totti-relay-checks
+          build/totti-relay-checks
 
       - name: Install tools
         run: brew install xcodegen

@@ -32,6 +32,7 @@ final class TottiVoiceRelay {
     }
     func acceptSession(_ id: String) -> Bool { session.accept(id) }
     func beginContinuous(_ id: String) {
+        print("[TottiBuild] optimized-20261016.1")
         lastHUDSendAt = ProcessInfo.processInfo.systemUptime
         controlID = id; turns = TottiDuplexTurns(); conversation = TottiConversationPolicy()
         userSpeaking = false; captureTurn = nil; awaitingTranscript.removeAll()
@@ -40,7 +41,7 @@ final class TottiVoiceRelay {
     func speechBegan() {
         guard controlID != nil, !sessionEnded else { return }
         userSpeaking = true
-        let id = UUID().uuidString; captureTurn = id
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased(); captureTurn = id
         if let playing = spokenID {
             speech.cancel(requestID: playing)
             speechTimeout?.cancel(); speechTimeout = nil; spokenID = nil
@@ -50,6 +51,7 @@ final class TottiVoiceRelay {
     func submitContinuous(_ wav: Data) {
         guard let id = captureTurn, controlID != nil, !sessionEnded else { return }
         captureTurn = nil; userSpeaking = false
+        print("[TottiPerf] stage=utterance_end turn=\(id) at=\(ProcessInfo.processInfo.systemUptime) bytes=\(wav.count)")
         awaitingTranscript.insert(id)
         submitCaptured(id, wav: wav)
         // Microphone never stopped; no repeated readiness notification.
@@ -95,7 +97,9 @@ final class TottiVoiceRelay {
         var event: [String: Any] = ["type": type, "request_id": controlID, "message": message]
         if let turn { event["turn_id"] = turn }
         if let text { event["text"] = text }
-        lastHUDSendAt = ProcessInfo.processInfo.systemUptime
+        if TottiDeliveryPolicy.shouldSend(type) {
+            lastHUDSendAt = ProcessInfo.processInfo.systemUptime
+        }
         send(event)
     }
     private func drainSpeech() {
@@ -135,6 +139,7 @@ final class TottiVoiceRelay {
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 throw RelayError.message("音声認識サーバー HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
             }
+            print("[TottiPerf] stage=transcript_received turn=\(id) at=\(ProcessInfo.processInfo.systemUptime)")
             let decoded = try Self.decodeTranscription(data, contentType: http.value(forHTTPHeaderField: "Content-Type") ?? "")
             let user = decoded.user
             if user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -163,6 +168,7 @@ final class TottiVoiceRelay {
             }
                 result = try Self.parseResponse(answerBody)
             }
+            print("[TottiPerf] stage=answer_received turn=\(id) at=\(ProcessInfo.processInfo.systemUptime)")
             emit("totti_answer", turn: id, message: result.answer)
             speechQueue.append((id, result.answer)); drainSpeech()
         } catch is CancellationError { }
