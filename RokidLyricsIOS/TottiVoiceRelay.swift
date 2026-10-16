@@ -43,14 +43,14 @@ final class TottiVoiceRelay {
             speech.cancel(requestID: playing)
             speechTimeout?.cancel(); speechTimeout = nil; spokenID = nil
         }
-        emit("totti_speech_started", turn: id, message: "聞き取っています…")
+        // HUD stays ready; speech onset is local, not another CXR packet.
     }
     func submitContinuous(_ wav: Data) {
         guard let id = captureTurn, controlID != nil, !sessionEnded else { return }
         captureTurn = nil; userSpeaking = false
         awaitingTranscript.insert(id)
         submitCaptured(id, wav: wav)
-        emit("totti_listening", message: "話しかけてください")
+        // Microphone never stopped; no repeated readiness notification.
     }
     func submitCaptured(_ id: String, wav: Data) {
         guard wav.count > 44, turns.insert(id) else { return }
@@ -132,21 +132,21 @@ final class TottiVoiceRelay {
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 throw RelayError.message("音声認識サーバー HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
             }
-            // Require the already deployed transcript-first Worker. Silently
-            // treating an old SSE response as a transcript would break receipt feedback.
-            guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let user = fields["text"] as? String else {
-                throw RelayError.message("Workerの音声認識先行応答を確認できませんでした。")
-            }
+            let decoded = try Self.decodeTranscription(data, contentType: http.value(forHTTPHeaderField: "Content-Type") ?? "")
+            let user = decoded.user
             if user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 emit("totti_turn_error", turn: id, message: "聞き取れませんでした。もう一度話してください。")
                 return
             }
             if TottiDeliveryPolicy.isExitPhrase(user) { close(emitTerminal: true); return }
             conversation.recognizedSpeech()
-            emit("totti_thinking", turn: id, message: "考えています…", text: user)
+            emit("totti_thinking", turn: id, message: "", text: user)
             awaitingTranscript.remove(id)
             drainSpeech()
+            let result: Result
+            if let completed = decoded.completed {
+                result = completed
+            } else {
             var chat = URLRequest(url: request.url!)
             chat.httpMethod = "POST"; chat.timeoutInterval = 60; chat.allowsCellularAccess = true
             chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -158,7 +158,8 @@ final class TottiVoiceRelay {
                   let answerBody = String(data: answerData, encoding: .utf8) else {
                 throw RelayError.message("AI回答の取得に失敗しました。")
             }
-            let result = try Self.parseResponse(answerBody)
+                result = try Self.parseResponse(answerBody)
+            }
             emit("totti_answer", turn: id, message: result.answer)
             speechQueue.append((id, result.answer)); drainSpeech()
         } catch is CancellationError { }
@@ -166,6 +167,29 @@ final class TottiVoiceRelay {
             guard turns.contains(id) else { return }
             emit("totti_turn_error", turn: id, message: error.localizedDescription)
         }
+    }
+    struct TranscriptionReply { let user: String; let completed: Result? }
+    static func decodeTranscription(_ data: Data, contentType: String) throws -> TranscriptionReply {
+        if contentType.lowercased().contains("application/json") {
+            guard let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let text = fields["text"] as? String else {
+                throw RelayError.message("音声認識サーバーの応答形式を確認できませんでした。")
+            }
+            return .init(user: text.trimmingCharacters(in: .whitespacesAndNewlines), completed: nil)
+        }
+        guard let body = String(data: data, encoding: .utf8), body.contains("data:") else {
+            throw RelayError.message("音声認識サーバーから想定外の応答が届きました。")
+        }
+        // Worker failures use SSE even when transcribe was requested. Do not
+        // feed them to a JSON parser or send the failure message to speech.
+        let result = try parseResponse(body)
+        if TottiConversationPolicy.isNoSpeechResponse(user: result.user, answer: result.answer) {
+            return .init(user: "", completed: nil)
+        }
+        guard !result.user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RelayError.message(result.answer)
+        }
+        return .init(user: result.user, completed: result)
     }
     struct Result { let user: String; let answer: String }
     enum RelayError: LocalizedError {

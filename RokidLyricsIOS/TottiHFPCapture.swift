@@ -20,6 +20,7 @@ final class TottiHFPCapture {
     private var startedAt = 0.0
     private var lastFrameAt = 0.0
     private var quietSince = 0.0
+    private var lastHeartbeatAt = 0.0
     private var observers: [NSObjectProtocol] = []
     init(send: @escaping ([String: Any]) -> Void, relay: TottiVoiceRelay) {
         self.send = send; self.relay = relay
@@ -37,6 +38,7 @@ final class TottiHFPCapture {
             }
             activeID = id; generation = UUID(); ready = false; segmenter = TottiDuplexSegmenter()
             startedAt = ProcessInfo.processInfo.systemUptime; lastFrameAt = startedAt; quietSince = startedAt
+            lastHeartbeatAt = startedAt
             relay.beginContinuous(id)
             startup = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -147,7 +149,10 @@ final class TottiHFPCapture {
                 guard now - self.lastFrameAt < 10 else {
                     self.fail("眼鏡の音声入力が10秒間届かないため停止しました。"); return
                 }
-                self.send(["type": "totti_heartbeat", "request_id": id])
+                if now - self.lastHeartbeatAt >= 15 {
+                    self.lastHeartbeatAt = now
+                    self.send(["type": "totti_heartbeat", "request_id": id])
+                }
                 if !self.segmenter.speaking, now - self.quietSince >= 30 {
                     self.relay.promptAfterSilence(id)
                 }

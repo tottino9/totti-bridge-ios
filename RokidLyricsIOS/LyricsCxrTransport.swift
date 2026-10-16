@@ -730,6 +730,8 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func sendTottiJSON(_ fields: [String: Any]) {
+            var fields = fields
+            fields["sent_wall_ms"] = Int64(Date().timeIntervalSince1970 * 1000)
             if fields["type"] as? String == "totti_session_end" {
                 userEndedTotti = true
                 openLoopActive = false
