@@ -326,11 +326,11 @@ final class LyricsCxrTransport: ObservableObject {
             if let error = session.media.startAudioStream(codec: .pcm, mode: .xf) {
                 // This app uses global commands in customApp mode on SDK 1.0.4.
                 // Use the documented legacy record API only on immediate modeMismatch.
-                if error == .modeMismatch {
+                if error == .modeMismatch || error == .notReady {
                     legacyMicStream = true
-                    print("[TottiCapture] session media modeMismatch; legacy startRecord type=\(micStreamType)")
+                    print("[TottiCapture] session media \(error); legacy startRecord type=\(micStreamType)")
                     if let fallback = CxrClient.shared.startRecord(micStreamType, codec: .pcm, mode: .xf) {
-                        return String(describing: fallback)
+                        return "session.media=\(error); client.startRecord=\(fallback)"
                     }
                 } else { return String(describing: error) }
             }
