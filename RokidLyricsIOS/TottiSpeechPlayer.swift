@@ -46,8 +46,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
                 try session.setActive(true)
             }
             // During a conversation keep the already selected HFP input/output.
-            // The continuous engine uses voice processing while synthesis plays.
-            // Actual HFP echo cancellation must be checked on the glasses.
+            // The recorder is stopped before synthesis, avoiding self-transcription.
         } catch {
             releaseAudioOwnership()
             report("totti_audio_error", "音声出力の準備失敗: \(error.localizedDescription)")

@@ -19,9 +19,7 @@ final class LyricsCxrTransport: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var protocolReady = false
-    // This build is the Totti bridge. Do not queue legacy lyrics hello/status/
-    // snapshot packets before the first voice command. SDK session auth is separate.
-    private var tottiTrafficActive = true
+    private var tottiTrafficActive = false
         private var userEndedTotti = false
     private var subscriptionNotified = false
     private var didOpenCustomApp = false
@@ -34,8 +32,6 @@ final class LyricsCxrTransport: ObservableObject {
     private let maxSendAttempts = 3
     private var lastTottiPongTime: TimeInterval?
     private var tottiRequestIDs: [String] = []
-    private var tottiWireVersions: [String: Int] = [:]
-    private var tottiWireRequests: [String] = []
     private var tottiRequestInFlight = false
     private let tottiSpeech = TottiSpeechPlayer()
     #if !targetEnvironment(simulator)
@@ -631,12 +627,6 @@ final class LyricsCxrTransport: ObservableObject {
             else { return false }
 
             if type.hasPrefix("totti_") { activateTottiTraffic() }
-            if type == "totti_mic_start", let id = fields["request_id"] as? String,
-               tottiWireVersions[id] == nil {
-                tottiWireVersions[id] = (fields["wire_v"] as? Int) == 2 ? 2 : 1
-                tottiWireRequests.append(id)
-                if tottiWireRequests.count > 32 { tottiWireVersions[tottiWireRequests.removeFirst()] = nil }
-            }
             if tottiCapture.handle(fields) {
                 if type == "totti_mic_start" && !tottiVoice.sessionEnded { userEndedTotti = false }
                 return true
@@ -740,8 +730,6 @@ final class LyricsCxrTransport: ObservableObject {
         }
 
         private func sendTottiJSON(_ fields: [String: Any]) {
-            var fields = fields
-            fields["sent_wall_ms"] = Int64(Date().timeIntervalSince1970 * 1000)
             if fields["type"] as? String == "totti_session_end" {
                 userEndedTotti = true
                 openLoopActive = false
@@ -750,11 +738,7 @@ final class LyricsCxrTransport: ObservableObject {
                 print("[TottiLocal] \(type) id=\(fields["request_id"] ?? "") \(fields["message"] ?? "")")
                 return
             }
-            let requestID = fields["request_id"] as? String ?? ""
-            let version = tottiWireVersions[requestID] ?? 1
-            let packet = TottiWireCodec.encode(fields, negotiatedVersion: version)
-            guard let data = try? JSONSerialization.data(withJSONObject: packet) else { return }
-            print("[TottiPerf] stage=cxr_send id=\(requestID) type=\(fields["type"] ?? "") version=\(version) bytes=\(data.count) at=\(ProcessInfo.processInfo.systemUptime)")
+            guard let data = try? JSONSerialization.data(withJSONObject: fields) else { return }
             let error = CxrClient.shared.sendCustomCmd(
                 cmd: TransportConstants.cxrPhoneToGlassesCommand,
                 payload: data,
