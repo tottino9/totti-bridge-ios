@@ -139,9 +139,7 @@ final class TottiVoiceRelay {
             if TottiConversationPolicy.isNoSpeechResponse(user: result.user, answer: result.answer) {
                 // Legacy Worker represents empty transcription as an answer event.
                 // Never speak that answer repeatedly as though it were a conversation.
-                activeID = nil
-                promptAfterSilence(id)
-                return
+                throw RelayError.message("診断B: 録音後の送信処理まで進みましたが、音声認識結果が空でした。")
             }
             if !result.user.isEmpty { conversation.recognizedSpeech() }
             if !alreadyDisplayedUser { reply("totti_user", id, result.user) }

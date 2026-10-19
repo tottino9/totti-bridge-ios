@@ -159,8 +159,7 @@ final class TottiHFPCapture {
                 if now - began >= 30 {
                     if heardSpeech { self.finish() }
                     else if !self.relay.hasAskedToEnd {
-                        self.cleanup(keepAudio: true)
-                        self.relay.promptAfterSilence(id)
+                        self.fail("診断A: 録音経過 \(recording.currentTime)秒、最大音量 \(peakDB)dB。30秒間、発話判定なし。")
                     } else {
                         // Stay listening silently after the single end-of-conversation prompt.
                         // Route and recorder health checks above remain active.
