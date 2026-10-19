@@ -40,5 +40,9 @@ struct TottiIntegrationSettings: View {
                 Text("会話で覚えてと言うだけでは記憶を変更しません。追加・訂正・削除はPCメニューで行います。出典情報はiPhone内に保持します。") .font(.footnote)
             }
         }
+        .environment(\.colorScheme, .dark)
+        .foregroundColor(.white)
+        .tint(.green)
+        .textFieldStyle(.roundedBorder)
     }
 }
