@@ -78,6 +78,7 @@ final class TottiVoiceRelay {
 
     private func askWorker(_ id: String, wav: Data) async {
         do {
+            let integration = try TottiIntegrationStore.current()
             let boundary = "Totti-" + UUID().uuidString
             var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8)
             body.append(wav)
@@ -124,15 +125,27 @@ final class TottiVoiceRelay {
                 chat.allowsCellularAccess = true
                 chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 chat.httpBody = try JSONSerialization.data(withJSONObject: ["text": user])
+                if let integration { chat = try integration.chatRequest(text: user) }
                 let (answerData, answerResponse) = try await URLSession.shared.data(for: chat)
                 try Task.checkCancellation()
                 guard activeID == id else { return }
-                guard let answerHTTP = answerResponse as? HTTPURLResponse, (200...299).contains(answerHTTP.statusCode),
-                      let answerBody = String(data: answerData, encoding: .utf8) else {
-                    throw RelayError.message("AI回答の取得に失敗しました。")
+                guard let answerHTTP = answerResponse as? HTTPURLResponse else {
+                    throw RelayError.message("AI回答のHTTP情報を取得できませんでした。")
                 }
-                result = try Self.parseResponse(answerBody)
+                if let integration {
+                    let answer = try integration.decode(answerData, status: answerHTTP.statusCode)
+                    TottiIntegrationStore.accept(answer, expected: integration)
+                    result = Result(user: user, answer: answer.text)
+                    print("[TottiHistory] saved=\(answer.saved) revision=\(answer.revision ?? 0)")
+                } else {
+                    guard (200...299).contains(answerHTTP.statusCode),
+                          let answerBody = String(data: answerData, encoding: .utf8) else {
+                        throw RelayError.message("AI回答の取得に失敗しました。")
+                    }
+                    result = try Self.parseResponse(answerBody)
+                }
             } else {
+                if integration != nil { throw RelayError.message("音声認識分離APIの応答を確認できませんでした。") }
                 // Compatibility with the old Worker during a staged update.
                 result = try Self.parseResponse(text)
             }

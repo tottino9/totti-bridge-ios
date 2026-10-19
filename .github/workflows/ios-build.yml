@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - "codex/totti-audio-rollback-*"
+      - "codex/totti-history-*"
 
 jobs:
   build:
@@ -27,6 +28,16 @@ jobs:
 
       - name: Show Xcode version
         run: xcodebuild -version
+
+      - name: Check Totti history API request and JSON response
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          swiftc -D TOTTI_CONTRACT_TEST -parse-as-library \
+            RokidLyricsIOS/TottiIntegration.swift \
+            scripts/TottiHistoryChecks.swift \
+            -o build/totti-history-checks
+          build/totti-history-checks
 
       - name: Check Totti PCM and microphone lifecycle
         run: |

@@ -182,6 +182,7 @@ struct ContentView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
+                        TottiIntegrationSettings()
                         spotifySettingsSection
                         lyricsSettingsSection
                         providerSettingsSection
