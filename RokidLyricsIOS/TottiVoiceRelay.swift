@@ -10,6 +10,7 @@ final class TottiVoiceRelay {
     private var completionRetries = TottiCompletionRetryPolicy()
     private let send: ([String: Any]) -> Void
     private let speech: TottiSpeechPlayer
+    var capturePhoto: (() async throws -> Data)?
 
     init(send: @escaping ([String: Any]) -> Void, speech: TottiSpeechPlayer) {
         self.send = send
@@ -125,7 +126,17 @@ final class TottiVoiceRelay {
                 chat.allowsCellularAccess = true
                 chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 chat.httpBody = try JSONSerialization.data(withJSONObject: ["text": user])
-                if let integration { chat = try integration.chatRequest(text: user) }
+                if TottiVisionPolicy.requestsCapture(user) {
+                    guard let integration else { throw RelayError.message("写真解析には履歴・記憶連携の設定が必要です。") }
+                    guard let capturePhoto else { throw RelayError.message("眼鏡の撮影機能が準備されていません。") }
+                    reply("totti_status", id, "写真を撮影しています…")
+                    let jpeg = try await capturePhoto()
+                    try Task.checkCancellation()
+                    guard activeID == id else { return }
+                    reply("totti_status", id, "写真を確認しています…")
+                    print("[TottiVision] captured id=\(id) jpegBytes=\(jpeg.count)")
+                    chat = try integration.visionRequest(text: user, jpeg: jpeg)
+                } else if let integration { chat = try integration.chatRequest(text: user) }
                 let (answerData, answerResponse) = try await URLSession.shared.data(for: chat)
                 try Task.checkCancellation()
                 guard activeID == id else { return }

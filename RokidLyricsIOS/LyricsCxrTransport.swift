@@ -40,6 +40,10 @@ final class LyricsCxrTransport: ObservableObject {
     }, speech: tottiSpeech)
     private var legacyMicStream = false
     private let micStreamType = "asr"
+    private lazy var tottiPhoto = TottiVisionCapture { width, height, quality, callback in
+        let error = CxrClient.shared.takePhotoWithData(width: width, height: height, quality: quality, callback: callback)
+        return error.map { String(describing: $0) }
+    }
     private lazy var tottiCapture = TottiHFPCapture(
         send: { [weak self] fields in self?.sendTottiJSON(fields) },
         relay: tottiVoice
@@ -440,6 +444,10 @@ final class LyricsCxrTransport: ObservableObject {
                 "[RokidLyricsCXR] session config type=\(session.config.type) package=\(session.config.customAppPackageName ?? "nil") state=\(session.state.rawValue)"
             )
 
+            tottiVoice.capturePhoto = { [weak self] in
+                guard let self else { throw TottiVisionCapture.Failure.message("眼鏡との接続がありません。") }
+                return try await self.tottiPhoto.jpeg()
+            }
             bind(session)
             // NB: session.commands.setNotifyEventListenCmds returns modeMismatch on this SDK
             // build; the global CxrClient.setNotifyEventListenCmds (bindLegacyClientEvents) is the

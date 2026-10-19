@@ -35,6 +35,7 @@ jobs:
           mkdir -p build
           swiftc -D TOTTI_CONTRACT_TEST -parse-as-library \
             RokidLyricsIOS/TottiIntegration.swift \
+            RokidLyricsIOS/TottiVisionPolicy.swift \
             scripts/TottiHistoryChecks.swift \
             -o build/totti-history-checks
           build/totti-history-checks
@@ -78,6 +79,17 @@ jobs:
             scripts/TottiDeliveryChecks.swift \
             -o build/totti-delivery-checks
           build/totti-delivery-checks
+
+      - name: Check explicit photo requests and existing API compatibility
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          swiftc -D TOTTI_CONTRACT_TEST -parse-as-library \
+            RokidLyricsIOS/TottiVisionPolicy.swift \
+            RokidLyricsIOS/TottiIntegration.swift \
+            scripts/TottiVisionChecks.swift \
+            -o build/totti-vision-checks
+          build/totti-vision-checks
 
       - name: Install tools
         run: brew install xcodegen

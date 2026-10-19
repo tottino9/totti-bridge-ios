@@ -27,6 +27,14 @@ struct TottiIntegration {
         request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "session_id": sessionID, "mode": mode])
         return request
     }
+    func visionRequest(text: String, jpeg: Data) throws -> URLRequest {
+        var request = try chatRequest(text: text)
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "text": text, "session_id": sessionID, "mode": "vision",
+            "image": try TottiVisionPolicy.imageDataURL(jpeg)
+        ])
+        return request
+    }
     static func validID(_ value: String) -> Bool {
         value.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil
     }
