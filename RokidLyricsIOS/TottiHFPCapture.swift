@@ -23,6 +23,11 @@ final class TottiHFPCapture {
     private var began = 0.0
     private var lastPCM = 0.0
     private var generation = UUID()
+    var hasLiveConversation:Bool { activeID != nil || relay.isBusy || TottiAudioGate.conversationActive }
+    var diagnosticSnapshot:String {
+        let age=lastPCM>0 ? Int((ProcessInfo.processInfo.systemUptime-lastPCM)*1000) : -1
+        return "stage=\(startupStage) engine=\(duplex.isRunning) hfp=\(validRoute()) pcmAgeMs=\(age) ready=\(readyAcknowledged) capture=\(activeID != nil)"
+    }
 
     init(send: @escaping ([String: Any]) -> Void, relay: TottiVoiceRelay) {
         self.send = send; self.relay = relay
@@ -124,6 +129,7 @@ final class TottiHFPCapture {
         }
         duplex.failed = { [weak self] message in self?.connectionLost(reason:message) }
         try duplex.start()
+        startupStage = "engineStarted"
         guard validRoute() else { throw Failure.message("録音開始時に入力が眼鏡以外へ変わりました。") }
         lastPCM = ProcessInfo.processInfo.systemUptime
         startup = nil
@@ -154,6 +160,7 @@ final class TottiHFPCapture {
         lastPCM = ProcessInfo.processInfo.systemUptime
         if let id = activeID {
             if readiness.accept(pcmBytes:data.count) {
+                startupStage = "receivingPCM"
                 readyAcknowledged = true
                 acknowledge(id)
                 if let wav = handoffWav {
@@ -190,6 +197,7 @@ final class TottiHFPCapture {
     private func submit(_ id:String,wav:Data) {
         guard activeID == id else { return }
         cleanup(keepAudio:true)
+        startupStage = "processingOrPlayback"
         reply("totti_processing",id,"聞き取っています…")
         relay.submitCaptured(id,wav:wav)
     }
@@ -207,7 +215,7 @@ final class TottiHFPCapture {
         if !TottiControlPausePolicy.mayContinueHFP(reason:reason) { connectionLost(reason:reason ?? "unknown") }
     }
     func connectionLost(reason:String = "linkDisconnected") {
-        if let id=activeID { reply("totti_error",id,"音声処理を停止しました [\(reason)]") }
+        if let id=activeID { reply("totti_error",id,"音声処理を停止しました [\(reason)] \(diagnosticSnapshot)") }
         cleanup(keepAudio:false)
         relay.connectionLost()
     }

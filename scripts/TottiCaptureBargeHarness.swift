@@ -1,4 +1,11 @@
 import Foundation
+import Dispatch
+// Platform test double, like the audio/UI doubles below. Keep the coordinator's
+// monotonic timing contract without initializing host process metadata.
+enum ProcessInfo {
+ struct Clock {var systemUptime:TimeInterval {Double(DispatchTime.now().uptimeNanoseconds)/1e9}}
+ static let processInfo=Clock()
+}
 @MainActor final class AVAudioSession {
     enum Permission { case granted,denied,undetermined }
     enum Port { case bluetoothHFP,builtInMic }
@@ -51,7 +58,13 @@ struct AVAudioSessionPortDescription { var uid="rokid";var portName="Rokid Glass
  func play(_ id:String){isBusy=true;speakingRequestID=id;onSpeechPlaybackChanged?(true)}
 }
 @main struct CaptureHarness {
- @MainActor static func settle() async {try? await Task.sleep(nanoseconds:20_000_000)}
+ @MainActor static func settle() async {
+  for _ in 0..<2000 {
+   if TottiDuplexAudio.shared.isRunning {return}
+   try? await Task.sleep(nanoseconds:1_000_000)
+  }
+  precondition(TottiDuplexAudio.shared.isRunning,"Capture startup did not settle")
+ }
  @MainActor static func main() async {
   let relay=TottiVoiceRelay();var sent:[[String:Any]]=[]
   let capture=TottiHFPCapture(send:{sent.append($0)},relay:relay)

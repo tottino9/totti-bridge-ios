@@ -38,6 +38,13 @@ final class LyricsCxrTransport: ObservableObject {
     private lazy var tottiVoice = TottiVoiceRelay(send: { [weak self] fields in
         self?.sendTottiJSON(fields)
     }, speech: tottiSpeech)
+    private var controlLinkReportedConnected = true
+    private lazy var controlRecovery=TottiControlLinkRecovery(
+        active:{[weak self] in guard let self else{return false};return !self.userEndedTotti && self.tottiCapture.hasLiveConversation},
+        probe:{[weak self] nonce in self?.sendTottiJSON(["type":"totti_control_probe","nonce":nonce])},
+        diagnostic:{[weak self] message in guard let self else{return};self.sendTottiJSON(["type":"totti_link_diagnostic","message":message+" "+self.tottiCapture.diagnosticSnapshot])},
+        failed:{[weak self] reason in self?.tottiCapture.connectionLost(reason:reason)}
+    )
     private var legacyMicStream = false
     private let micStreamType = "asr"
     private lazy var tottiPhoto = TottiVisionCapture { width, height, quality, callback in
@@ -401,9 +408,12 @@ final class LyricsCxrTransport: ObservableObject {
                 .sink { [weak self] connected in
                     Task { @MainActor in
                         if connected {
+                            self?.controlLinkReportedConnected=true
+                            self?.controlRecovery.connected()
                             self?.configureCustomAppSession()
                         } else {
-                            self?.tottiCapture.connectionLost(reason: "linkDisconnected")
+                            self?.controlLinkReportedConnected=false
+                            self?.verifyControlPath(reason:"linkDisconnected")
                             self?.protocolReady = false
                             self?.subscriptionNotified = false
                             self?.status = DeviceStatus(
@@ -415,6 +425,9 @@ final class LyricsCxrTransport: ObservableObject {
                 }
                 .store(in: &cancellables)
         }
+
+        private func cancelControlRecovery(){controlRecovery.cancel()}
+        private func verifyControlPath(reason:String){controlRecovery.disconnected(reason:reason)}
 
         private func configureCustomAppSession() {
             print("[RokidLyricsCXR] configureCustomAppSession()")
@@ -546,6 +559,11 @@ final class LyricsCxrTransport: ObservableObject {
                 tottiCapture.controlPaused(reason: event.reason?.rawValue)
                 status = DeviceStatus(connectionState: .connecting, statusLabel: "CXR-L session paused.")
             case .unavailable:
+                if !controlLinkReportedConnected, !userEndedTotti, tottiCapture.hasLiveConversation {
+                    verifyControlPath(reason:"sessionUnavailable/"+(event.reason?.rawValue ?? "unknown"))
+                    return
+                }
+                cancelControlRecovery()
                 tottiCapture.connectionLost(reason: "sessionUnavailable/" + (event.reason?.rawValue ?? "unknown"))
                 protocolReady = false
                 subscriptionNotified = false
@@ -634,9 +652,19 @@ final class LyricsCxrTransport: ObservableObject {
                   let type = fields["type"] as? String
             else { return false }
 
+            if type == "totti_control_probe_reply" {
+                guard !userEndedTotti, tottiCapture.hasLiveConversation,
+                      let nonce=fields["nonce"] as? String, controlRecovery.acknowledge(nonce) else { return true }
+                protocolReady=true
+                status=DeviceStatus(connectionState:.connected,statusLabel:"TOTTI custom control round trip verified.",bluetoothClientCount:1)
+                return true
+            }
             if type.hasPrefix("totti_") { activateTottiTraffic() }
             if tottiCapture.handle(fields) {
-                if type == "totti_mic_start" && !tottiVoice.sessionEnded { userEndedTotti = false }
+                if type == "totti_mic_start" && !tottiVoice.sessionEnded {
+                    userEndedTotti = false
+                    if !controlLinkReportedConnected {verifyControlPath(reason:"micStartWhileSDKFalse")}
+                }
                 return true
             }
             if type.hasPrefix("totti_voice_") {
@@ -740,6 +768,7 @@ final class LyricsCxrTransport: ObservableObject {
         private func sendTottiJSON(_ fields: [String: Any]) {
             if fields["type"] as? String == "totti_session_end" {
                 userEndedTotti = true
+                cancelControlRecovery()
                 openLoopActive = false
             }
             if let type = fields["type"] as? String, !TottiDeliveryPolicy.shouldSend(type) {
