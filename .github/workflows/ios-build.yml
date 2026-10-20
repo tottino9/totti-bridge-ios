@@ -91,6 +91,39 @@ jobs:
             -o build/totti-vision-checks
           build/totti-vision-checks
 
+      - name: Check barge-in playback completion and input readiness
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiPlaybackDrain.swift \
+            scripts/TottiBargeInChecks.swift \
+            -o build/totti-barge-in-checks
+          build/totti-barge-in-checks
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          text=Path('RokidLyricsIOS/TottiHFPCapture.swift').read_text()
+          Path('build/TottiCaptureUnderTest.swift').write_text(text.replace('import AVFoundation\n','').replace('import UIKit\n',''))
+          PYTHON
+          swiftc -parse-as-library \
+            scripts/TottiCaptureBargeHarness.swift \
+            build/TottiCaptureUnderTest.swift \
+            RokidLyricsIOS/TottiAudioGate.swift \
+            RokidLyricsIOS/TottiHFPInputPolicy.swift \
+            RokidLyricsIOS/TottiDuplexPolicy.swift \
+            RokidLyricsIOS/TottiPCMBuffer.swift \
+            -o build/totti-capture-barge-checks
+          build/totti-capture-barge-checks
+          swiftc -parse-as-library \
+            RokidLyricsIOS/TottiDuplexPolicy.swift \
+            RokidLyricsIOS/TottiPCMBuffer.swift \
+            RokidLyricsIOS/TottiDeliveryPolicy.swift \
+            RokidLyricsIOS/TottiWireCodec.swift \
+            scripts/TottiLegacySegmenterForChecks.swift \
+            scripts/TottiDuplexChecks.swift \
+            -o build/totti-duplex-checks
+          build/totti-duplex-checks
+
       - name: Install tools
         run: brew install xcodegen
 

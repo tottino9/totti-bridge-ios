@@ -6,6 +6,10 @@ import Foundation
 @MainActor
 final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
+    var onPlaybackChanged: ((Bool) -> Void)?
+    var isSpeaking: Bool { current != nil }
+    var speakingRequestID: String? { current == nil ? nil : requestID }
+    private var graphPlayback = false
     private var current: AVSpeechUtterance?
     private var report: ((String, String) -> Void)?
     private var completed: (() -> Void)?
@@ -46,7 +50,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
                 try session.setActive(true)
             }
             // During a conversation keep the already selected HFP input/output.
-            // The recorder is stopped before synthesis, avoiding self-transcription.
+            // Conversation synthesis goes through the voice-processing graph for echo cancellation.
         } catch {
             releaseAudioOwnership()
             report("totti_audio_error", "音声出力の準備失敗: \(error.localizedDescription)")
@@ -71,7 +75,24 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         current = utterance
         print("[TottiAudio] requested id=\(requestID)")
-        synthesizer.speak(utterance)
+        graphPlayback = TottiDuplexAudio.shared.isRunning
+        if graphPlayback {
+            let token = TottiDuplexAudio.shared.beginPlayback { [weak self] in
+                guard let self, self.current === utterance else { return }
+                self.finish(type:"totti_audio_status",message:"読み上げ処理完了")
+            }
+            synthesizer.write(utterance) { [weak self] buffer in
+                guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.current === utterance else { return }
+                    TottiDuplexAudio.shared.appendPlayback(pcm,token:token)
+                    if pcm.frameLength > 0 {
+                        self.startTimeout?.cancel(); self.startTimeout=nil
+                    }
+                }
+            }
+            onPlaybackChanged?(true)
+        } else { synthesizer.speak(utterance) }
         startTimeout = Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
             guard let self, self.current != nil else { return }
@@ -87,6 +108,8 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         completed = nil
         report = nil
         current = nil
+        TottiDuplexAudio.shared.cancelPlayback()
+        onPlaybackChanged?(false)
         synthesizer.stopSpeaking(at: .immediate)
         releaseAudioOwnership()
     }
@@ -98,6 +121,8 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         let callback = completed
         completed = nil
         report?(type, message)
+        if graphPlayback { TottiDuplexAudio.shared.cancelPlayback() }
+        onPlaybackChanged?(false)
         current = nil
         report = nil
         releaseAudioOwnership()
@@ -122,7 +147,7 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor [weak self] in
             guard let self, self.current === utterance else { return }
-            self.finish(type: "totti_audio_status", message: "読み上げ処理完了（聞こえたかは実機で確認）")
+            if !self.graphPlayback { self.finish(type: "totti_audio_status", message: "読み上げ処理完了（聞こえたかは実機で確認）") }
         }
     }
 

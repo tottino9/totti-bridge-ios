@@ -10,11 +10,19 @@ final class TottiVoiceRelay {
     private var completionRetries = TottiCompletionRetryPolicy()
     private let send: ([String: Any]) -> Void
     private let speech: TottiSpeechPlayer
+    var onSpeechPlaybackChanged: ((Bool) -> Void)?
+    var speakingRequestID: String? { speech.speakingRequestID }
+    func interruptSpeech() {
+        guard let id=activeID, speech.isSpeaking else { return }
+        speech.cancel(requestID:id)
+        finish(id)
+    }
     var capturePhoto: (() async throws -> Data)?
 
     init(send: @escaping ([String: Any]) -> Void, speech: TottiSpeechPlayer) {
         self.send = send
         self.speech = speech
+        speech.onPlaybackChanged = { [weak self] value in self?.onSpeechPlaybackChanged?(value) }
     }
 
     var isBusy: Bool { activeID != nil }
