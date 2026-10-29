@@ -1,0 +1,22 @@
+✔ dry run signs only and never installs (17.567628ms)
+✔ validated update installs once with -r and verifies actual bytes (21.583017ms)
+✔ noDevice stops before any device mutation (3.255487ms)
+✔ split stops before any device mutation (2.389134ms)
+✔ wrongBaseline stops before any device mutation (4.830773ms)
+✔ badSignature stops before any device mutation (2.981995ms)
+✔ missingKey stops before any device mutation (6.118702ms)
+✔ modified candidate stops before ADB (2.4779ms)
+✔ install failure is not reported as success (9.541892ms)
+✔ post-install byte mismatch is explicit and never triggers uninstall (11.486132ms)
+✔ restore preserves package data and verifies installed bytes (5.396924ms)
+✔ restore tampered refuses mutation (1.325271ms)
+✔ restore wrongDevice refuses mutation (1.694033ms)
+✔ restore detects wrong installed bytes (3.294144ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4335.345256
