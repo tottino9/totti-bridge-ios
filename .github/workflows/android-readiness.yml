@@ -1,0 +1,49 @@
+name: Isolated Android readiness validation
+on:
+  push:
+    branches: [codex/totti-readiness-20261029]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Select source without changing baseline audio/transport
+        env:
+          SOURCE_VARIANT: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          mkdir -p android-readiness-validation/build-records
+          if [[ "$SOURCE_VARIANT" == baseline ]]; then
+            cp android-readiness-validation/baseline/*.kt android-readiness-validation/app/src/main/java/com/helm/rode/
+            rm android-readiness-validation/app/src/test/java/com/helm/rode/ReadinessPresentationTest.kt
+          fi
+          { git rev-parse HEAD; java -version; gradle --version; } > android-readiness-validation/build-records/environment.txt 2>&1
+      - name: Build app and execute JVM / Robolectric tests
+        run: |
+          set -euo pipefail
+          gradle -p android-readiness-validation --no-daemon testDebugUnitTest assembleDebug --stacktrace | tee android-readiness-validation/build-records/build.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-readiness-${{ matrix.source }}
+          path: |
+            android-readiness-validation/app/build/outputs/apk/debug/*.apk
+            android-readiness-validation/app/build/test-results/testDebugUnitTest/*.xml
+            android-readiness-validation/app/build/reports/tests/testDebugUnitTest/**
+            android-readiness-validation/build-records/**

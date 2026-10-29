@@ -1,0 +1,28 @@
+<resources>
+
+    <string name="app_name">totti-ai</string>
+
+    <string name="accessibility_service_description">
+        3連タップでtotti-aiを起動するためのキー監視サービス
+    </string>
+
+    <string name="idle_hint"></string>
+
+    <string name="status_recognizing">聞いています…</string>
+    <string name="status_thinking">考えています…</string>
+
+    <string name="msg_cancelled">キャンセルしました</string>
+
+    <string name="err_no_speech">音声を認識できませんでした</string>
+    <string name="err_backend_unreachable">AIに接続できませんでした</string>
+    <string name="err_timeout">応答がタイムアウトしました</string>
+    <string name="err_generic">エラーが発生しました</string>
+    <string name="err_disconnected">接続が切れました</string>
+    <string name="err_mic_denied">マイクの使用が許可されていません</string>
+
+    <string name="divider_history"></string>
+    <string name="divider_chatted"></string>
+
+    <string name="divider_date_pattern">M月d日 HH:mm</string>
+
+</resources>
