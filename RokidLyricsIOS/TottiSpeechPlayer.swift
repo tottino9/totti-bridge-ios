@@ -1,3 +1,4 @@
+#if !TOTTI_EXPERIMENTAL_DUPLEX
 import AVFoundation
 import Foundation
 
@@ -133,3 +134,191 @@ final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 }
+#else
+import AVFoundation
+import Foundation
+
+/// Keeps speech alive independently of the HTTP task. Playback uses the iPhone's
+/// selected Bluetooth audio output; CXR data connectivity alone is insufficient.
+@MainActor
+final class TottiSpeechPlayer: NSObject, AVSpeechSynthesizerDelegate {
+    private let synthesizer = AVSpeechSynthesizer()
+    var onPlaybackChanged: ((Bool) -> Void)?
+    var isSpeaking: Bool { current != nil }
+    var speakingRequestID: String? { current == nil ? nil : requestID }
+    private var graphPlayback = false
+    private var current: AVSpeechUtterance?
+    private var report: ((String, String) -> Void)?
+    private var completed: (() -> Void)?
+    private var requestID = ""
+    private var audioOwner: String?
+    private var startTimeout: Task<Void, Never>?
+    nonisolated private let synthesisQueue = TottiAudioCallbackQueue<(AVSpeechUtterance,AVAudioPCMBuffer,UUID)>()
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+        synthesizer.usesApplicationAudioSession = true
+    }
+
+    func speak(_ text: String, requestID: String, completed: (() -> Void)? = nil, report: @escaping (String, String) -> Void) {
+        guard current == nil else {
+            report("totti_audio_error", "前の回答を読み上げ中です。")
+            completed?()
+            return
+        }
+        guard let voice = AVSpeechSynthesisVoice(language: "ja-JP") else {
+            report("totti_audio_error", "iPhoneの日本語音声を利用できません。")
+            completed?()
+            return
+        }
+        guard !TottiAudioGate.conversationActive || TottiDuplexAudio.shared.isRunning else {
+            report("totti_audio_error", "会話の音声入力が停止しているため読み上げを開始できません。")
+            completed?()
+            return
+        }
+        let owner = "speech:" + requestID
+        guard TottiAudioGate.acquire(owner) else {
+            report("totti_audio_error", "録音中のため読み上げを開始できません。")
+            completed?()
+            return
+        }
+        audioOwner = owner
+        let session = AVAudioSession.sharedInstance()
+        do {
+            // Matches the existing background keep-alive session. Do not deactivate
+            // this shared session when speech finishes.
+            if !TottiAudioGate.conversationActive {
+                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                try session.setActive(true)
+            }
+            // During a conversation keep the already selected HFP input/output.
+            // Conversation synthesis goes through the voice-processing graph for echo cancellation.
+        } catch {
+            releaseAudioOwnership()
+            report("totti_audio_error", "音声出力の準備失敗: \(error.localizedDescription)")
+            completed?()
+            return
+        }
+        let outputs = session.currentRoute.outputs
+        let route = outputs.map { "\($0.portName) [\($0.portType.rawValue)]" }.joined(separator: ", ")
+        print("[TottiAudio] route id=\(requestID) output=\(route) volume=\(session.outputVolume)")
+        report("totti_audio_status", "出力先: \(route) / 音量: \(session.outputVolume)")
+        guard outputs.contains(where: { $0.portType == .bluetoothA2DP || $0.portType == .bluetoothHFP }) else {
+            releaseAudioOwnership()
+            report("totti_audio_error", "Bluetooth音声出力が未選択です。iPhoneの再生出力先をRokidにしてください。")
+            completed?()
+            return
+        }
+        self.completed = completed
+        self.requestID = requestID
+        self.report = report
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = voice
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        current = utterance
+        print("[TottiAudio] requested id=\(requestID)")
+        graphPlayback = TottiDuplexAudio.shared.isRunning
+        if graphPlayback {
+            let token = TottiDuplexAudio.shared.beginPlayback { [weak self] in
+                guard let self, self.current === utterance else { return }
+                self.finish(type:"totti_audio_status",message:"読み上げ処理完了")
+            }
+            synthesizer.write(utterance) { [weak self] buffer in
+                guard let self else{return}
+                guard let input=buffer as? AVAudioPCMBuffer,let pcm=TottiSpeechPCM.copy(input) else {
+                    Task { @MainActor [weak self] in
+                        guard let self,self.current === utterance else{return}
+                        self.finish(type:"totti_audio_error",message:"読み上げ音声を保持できませんでした。")
+                    }
+                    return
+                }
+                switch self.synthesisQueue.offer((utterance,pcm,token),bytes:TottiSpeechPCM.byteCount(pcm)) {
+                case .queued: break
+                case .schedule:
+                    Task { @MainActor [weak self] in self?.drainSynthesis() }
+                case .overflow:
+                    Task { @MainActor [weak self] in
+                        guard let self,self.current === utterance else{return}
+                        self.finish(type:"totti_audio_error",message:"読み上げ音声の待機量が上限に達しました。")
+                    }
+                }
+            }
+            onPlaybackChanged?(true)
+        } else { synthesizer.speak(utterance) }
+        startTimeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+            guard let self, self.current != nil else { return }
+            self.synthesizer.stopSpeaking(at: .immediate)
+            self.finish(type: "totti_audio_error", message: "読み上げ開始を15秒以内に確認できませんでした。")
+        }
+    }
+
+    func cancel(requestID: String) {
+        guard self.requestID == requestID, current != nil else { return }
+        startTimeout?.cancel()
+        startTimeout = nil
+        completed = nil
+        report = nil
+        current = nil
+        synthesisQueue.clear()
+        TottiDuplexAudio.shared.cancelPlayback()
+        onPlaybackChanged?(false)
+        synthesizer.stopSpeaking(at: .immediate)
+        releaseAudioOwnership()
+    }
+
+    private func finish(type: String, message: String) {
+        startTimeout?.cancel()
+        startTimeout = nil
+        print("[TottiAudio] \(type) id=\(requestID) \(message)")
+        let callback = completed
+        completed = nil
+        synthesisQueue.clear()
+        report?(type, message)
+        if graphPlayback { TottiDuplexAudio.shared.cancelPlayback() }
+        onPlaybackChanged?(false)
+        current = nil
+        report = nil
+        releaseAudioOwnership()
+        callback?()
+    }
+
+    private func drainSynthesis() {
+        while let (utterance,pcm,token)=synthesisQueue.take() {
+            guard current === utterance else {continue}
+            TottiDuplexAudio.shared.appendPlayback(pcm,token:token)
+            if pcm.frameLength>0 {startTimeout?.cancel();startTimeout=nil}
+        }
+    }
+
+    private func releaseAudioOwnership() {
+        if let owner = audioOwner { TottiAudioGate.release(owner) }
+        audioOwner = nil
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            guard let self, self.current === utterance else { return }
+            self.startTimeout?.cancel()
+            self.startTimeout = nil
+            print("[TottiAudio] started id=\(self.requestID)")
+            self.report?("totti_audio_status", "読み上げ開始（聞こえたかは実機で確認）")
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            guard let self, self.current === utterance else { return }
+            if !self.graphPlayback { self.finish(type: "totti_audio_status", message: "読み上げ処理完了（聞こえたかは実機で確認）") }
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            guard let self, self.current === utterance else { return }
+            self.finish(type: "totti_audio_error", message: "読み上げが中断されました。")
+        }
+    }
+}
+#endif
