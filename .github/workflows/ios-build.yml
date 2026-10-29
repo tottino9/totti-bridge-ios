@@ -1,4 +1,4 @@
-# Unexecuted candidate: replace THIS registered workflow path on an isolated branch only.
+# Isolated candidate: never install automatically or modify main.
 # The main branch remains unchanged; only this isolated branch may trigger on push.
 # Overlaid candidate app sources must already be in RokidLyricsIOS/.
 # Place RealAVPCMChecks.swift in preflight/ before dispatch.
@@ -70,6 +70,18 @@ jobs:
           fi
           command+=(build)
           "${command[@]}" | tee "build/ios-$AUDIO_VARIANT-build.txt"
+      - name: Package ad-hoc IPA for owner re-signing, never install
+        env:
+          AUDIO_VARIANT: ${{ matrix.audio }}
+        run: bash preflight/package-ipa.sh
+      - name: Upload isolated test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: totti-test-${{ matrix.audio }}-resignable
+          path: |
+            build/Totti-preflight-${{ matrix.audio }}-resignable.ipa
+            build/Totti-preflight-${{ matrix.audio }}-resignable.ipa.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
