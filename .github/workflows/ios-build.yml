@@ -58,11 +58,12 @@ jobs:
           AUDIO_VARIANT: ${{ matrix.audio }}
         run: |
           set -euo pipefail
-          args=()
+          command=(xcodebuild -workspace RokidLyricsIOS.xcworkspace -scheme RokidLyricsIOS -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath "build/DerivedData-$AUDIO_VARIANT" CODE_SIGNING_ALLOWED=NO)
           if [[ "$AUDIO_VARIANT" == duplex ]]; then
-            args=('SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) TOTTI_EXPERIMENTAL_DUPLEX')
+            command+=('SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) TOTTI_EXPERIMENTAL_DUPLEX')
           fi
-          xcodebuild -workspace RokidLyricsIOS.xcworkspace -scheme RokidLyricsIOS -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath "build/DerivedData-$AUDIO_VARIANT" CODE_SIGNING_ALLOWED=NO "${args[@]}" build | tee "build/ios-$AUDIO_VARIANT-build.txt"
+          command+=(build)
+          "${command[@]}" | tee "build/ios-$AUDIO_VARIANT-build.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

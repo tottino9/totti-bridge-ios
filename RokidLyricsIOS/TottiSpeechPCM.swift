@@ -3,7 +3,8 @@ import AVFoundation
 import Foundation
 
 enum TottiSpeechPCM {
-    // mutableAudioBufferList describes capacity, not the valid audio payload.
+    // Derive valid payload from frameLength/stride, and treat mDataByteSize as a bound.
+    // Xcode 16.4's real AV test reported frame-sized byte counts for both list accessors.
     private static func bytesPerBuffer(_ input:AVAudioPCMBuffer) -> Int? {
         let stride=Int(input.format.streamDescription.pointee.mBytesPerFrame)
         let (bytes,overflow)=Int(input.frameLength).multipliedReportingOverflow(by:stride)
