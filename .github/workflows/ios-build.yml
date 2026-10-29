@@ -46,6 +46,12 @@ jobs:
           mkdir -p build
           swiftc -D TOTTI_EXPERIMENTAL_DUPLEX -parse-as-library RokidLyricsIOS/TottiSpeechPCM.swift preflight/RealAVPCMChecks.swift -o build/real-av-pcm
           build/real-av-pcm | tee build/real-av-pcm-results.txt
+      - name: Execute callback queue using real MainActor and Dispatch
+        if: matrix.audio == 'duplex'
+        run: |
+          set -euo pipefail
+          swiftc -D TOTTI_EXPERIMENTAL_DUPLEX -parse-as-library RokidLyricsIOS/TottiAudioCallbackQueue.swift preflight/MainActorQueueChecks.swift -o build/mainactor-queue
+          build/mainactor-queue | tee build/mainactor-queue-results.txt
       - name: Prepare the existing project and locked SDK dependencies
         run: |
           set -euo pipefail
